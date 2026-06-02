@@ -8,5 +8,8 @@
     "record_interval": 10,
     "recordings_dir": "./recordings",
     "force_discover": false,
+    "audio_matching_enabled": true,
+    "audio_matching_threshold": 0.45,
+    "audio_matching_target_path": "./recording_b7MVSqRi.wav",
     "__meta__": "Configuration profile loaded from config.json instead of .env. Modify values to change defaults."
 }
