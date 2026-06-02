@@ -1,15 +1,26 @@
 {
     "video_device": "/dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._USB_2.0_Camera-video-index0",
-    "alsa_device": "hw:1,0",
     "video_size": "1280x720",
-    "video_fps": 15,
+    "video_fps": 30,
+
+    "alsa_device": "hw:1,0",
     "sampling_rate": 48000,
     "channels": 1,
-    "record_interval": 10,
+
+    "record_interval": 300,
     "recordings_dir": "./recordings",
+    "recording_enabled": true,
     "force_discover": false,
+    
+    "show_window": true,
+    
     "audio_matching_enabled": true,
     "audio_matching_threshold": 0.45,
     "audio_matching_target_path": "./recording_b7MVSqRi.wav",
+
+    "run_on_video": false,
+    "video_input_path": "/home/wot-rishabh/Rishabh/Working/R&D/Camera_and_voice/streaming_workspace/recordings_1/rec_20260601_180226.mp4",
+    "__video_simulation_comment__": "If run_on_video is true, the system demuxes and matches audio/video from the file instead of using live camera/mic.",
+    
     "__meta__": "Configuration profile loaded from config.json instead of .env. Modify values to change defaults."
 }

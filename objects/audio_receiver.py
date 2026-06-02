@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-import os
-import sys
 import time
 import subprocess
 import threading
+import os
+import sys
 from collections import deque
 import numpy as np
+
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 
 class AudioReceiver:
     """
@@ -39,11 +44,8 @@ class AudioReceiver:
     def start(self):
         """Starts the background thread to capture ALSA audio."""
         self.stopped = False
-        
-        # Try arecord first, then fallback to ffmpeg if arecord is missing or fails
         capture_device = self._get_sharing_capture_device()
         
-        # We will try arecord command
         arecord_cmd = [
             "arecord",
             "-D", capture_device,
@@ -54,7 +56,6 @@ class AudioReceiver:
             "-"
         ]
         
-        # Fallback ffmpeg command
         ffmpeg_cmd = [
             "ffmpeg", "-y",
             "-f", "alsa",
@@ -66,7 +67,6 @@ class AudioReceiver:
             "pipe:1"
         ]
         
-        # Try launching arecord
         print(f"[AudioReceiver] Initializing capture from {capture_device} ({self.sample_rate}Hz)...")
         try:
             self.process = subprocess.Popen(
@@ -75,10 +75,8 @@ class AudioReceiver:
                 stderr=subprocess.DEVNULL,
                 bufsize=4096
             )
-            # Short test read
             time.sleep(0.2)
             if self.process.poll() is not None:
-                # arecord failed or exited early, let's try ffmpeg
                 print("[AudioReceiver] 'arecord' exited early. Retrying with 'ffmpeg' capture backend...")
                 self.process = subprocess.Popen(
                     ffmpeg_cmd,
@@ -97,7 +95,7 @@ class AudioReceiver:
                 )
             except Exception as ex:
                 print(f"[AudioReceiver] CRITICAL: Both capture backends failed to start: {ex}", file=sys.stderr)
-                raise RuntimeError("Could not initialize live audio capture backend (arecord and ffmpeg failed).")
+                raise RuntimeError("Could not initialize live audio capture backend.")
 
         self.thread = threading.Thread(target=self._capture_loop, name="AudioCaptureThread", daemon=True)
         self.thread.start()
@@ -126,13 +124,9 @@ class AudioReceiver:
                     time.sleep(0.01)
                     continue
                     
-                # Convert raw bytes to int16 numpy array
                 samples = np.frombuffer(raw_data, dtype=np.int16)
-                
-                # Convert to float32 normalized to [-1.0, 1.0]
                 samples_float = samples.astype(np.float32) / 32768.0
                 
-                # Write to rolling buffer
                 with self.lock:
                     self.audio_buffer.extend(samples_float)
             except Exception as e:
@@ -148,14 +142,11 @@ class AudioReceiver:
             if buffer_len == 0:
                 return np.zeros(samples_needed, dtype=np.float32)
                 
-            # If we don't have enough samples, pad with zeros
             if buffer_len < samples_needed:
                 padding = np.zeros(samples_needed - buffer_len, dtype=np.float32)
                 data = np.array(self.audio_buffer, dtype=np.float32)
                 return np.concatenate((padding, data))
             else:
-                # Return the slice from the end of the deque
-                # Converting the whole deque is simple, but we can slice it
                 deque_list = list(self.audio_buffer)
                 return np.array(deque_list[-samples_needed:], dtype=np.float32)
 
@@ -175,3 +166,117 @@ class AudioReceiver:
         if self.thread:
             self.thread.join(timeout=1.0)
         print("[AudioReceiver] Capture stream successfully terminated.")
+
+
+class VirtualAudioReceiver:
+    """
+    A high-performance virtual audio receiver that pre-loads the entire audio track
+    from an offline video file into memory on startup using a fast, synchronous FFmpeg call.
+    Provides sample-accurate, zero-latency real-time retrieval with seamless loop wrap-around.
+    Guarantees no missing start seconds in saved video recordings.
+    """
+    def __init__(self, video_path, sample_rate=48000, channels=1, max_buffer_seconds=10):
+        self.video_path = video_path
+        self.sample_rate = sample_rate
+        self.channels = channels
+        
+        self.full_audio_track = np.array([], dtype=np.float32)
+        self.video_duration = 1.0
+        self.start_playback_time = 0.0
+        self.system_start_time = 0.0
+        self.stopped = False
+
+    def start(self):
+        """Synchronously pre-loads the audio track into memory and starts the playback timer."""
+        self.stopped = False
+        
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", self.video_path,
+            "-f", "s16le",
+            "-ac", str(self.channels),
+            "-ar", str(self.sample_rate),
+            "-acodec", "pcm_s16le",
+            "pipe:1"
+        ]
+        
+        print(f"[VirtualAudioReceiver] Synchronously pre-loading entire audio track from: '{os.path.basename(self.video_path)}'...")
+        try:
+            # Decode the entire file audio synchronously in less than 50-100ms
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL
+            )
+            raw_bytes, _ = process.communicate()
+            
+            # Decode int16 PCM bytes to float32
+            samples = np.frombuffer(raw_bytes, dtype=np.int16)
+            self.full_audio_track = samples.astype(np.float32) / 32768.0
+            
+            # Fetch video duration from file using OpenCV to ensure sample alignment
+            if cv2 is not None:
+                cap = cv2.VideoCapture(self.video_path)
+                if cap.isOpened():
+                    total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    self.video_duration = total_frames / fps if (fps and fps > 0) else (len(self.full_audio_track) / self.sample_rate)
+                    cap.release()
+                else:
+                    self.video_duration = len(self.full_audio_track) / self.sample_rate
+            else:
+                self.video_duration = len(self.full_audio_track) / self.sample_rate
+                
+            print(f"[VirtualAudioReceiver] Pre-loaded {len(self.full_audio_track)} samples successfully ({self.video_duration:.2f}s duration).")
+            self.system_start_time = time.time()
+            self.reset_timer()
+        except Exception as e:
+            print(f"[VirtualAudioReceiver] CRITICAL: Failed to pre-load audio track: {e}", file=sys.stderr)
+            self.full_audio_track = np.zeros(self.sample_rate * 10, dtype=np.float32)
+            self.video_duration = 10.0
+            self.system_start_time = time.time()
+            self.reset_timer()
+            
+        return self
+
+    def reset_timer(self):
+        """Resets the playback start timer. Called synchronously when the video loops back to 0."""
+        self.start_playback_time = time.time()
+
+    def get_audio_window(self, seconds):
+        """
+        Returns the exact segment of audio played over the last N seconds.
+        Utilizes seamless modulo indexing to wrap around loop points cleanly.
+        """
+        if len(self.full_audio_track) == 0:
+            return np.zeros(int(self.sample_rate * seconds), dtype=np.float32)
+            
+        # Get real-time elapsed playback duration
+        elapsed = time.time() - self.start_playback_time
+        
+        # Wrap time around video duration
+        end_time = elapsed % self.video_duration
+        
+        total_samples = len(self.full_audio_track)
+        end_sample = int(end_time * self.sample_rate)
+        duration_samples = int(seconds * self.sample_rate)
+        start_sample = end_sample - duration_samples
+        
+        # Get total elapsed time since the receiver started to avoid zero-padding inside loops
+        total_elapsed = time.time() - self.system_start_time
+        
+        # If in the very first loop segment (since app startup) and start is negative, pad with zeros
+        if total_elapsed < seconds:
+            pad_len = -start_sample
+            if pad_len > 0:
+                slice_data = self.full_audio_track[0 : end_sample]
+                return np.concatenate((np.zeros(pad_len, dtype=np.float32), slice_data))
+            
+        # Otherwise, slice the array with modulo wrapping to guarantee seamless continuity
+        indices = np.arange(start_sample, end_sample) % total_samples
+        return self.full_audio_track[indices]
+
+    def stop(self):
+        """Cleans up the virtual receiver state."""
+        self.stopped = True
+        print("[VirtualAudioReceiver] Virtual audio stream stopped.")

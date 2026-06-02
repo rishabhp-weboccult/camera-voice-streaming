@@ -157,18 +157,14 @@ class AudioMatcher:
         log_mel = np.log1p(mel_spec)
         
         # 1. Cepstral Mean Subtraction (CMS) over the time axis:
-        # Erases static microphone response hums.
         mean_over_time = np.mean(log_mel, axis=0, keepdims=True)
         cms_mel = log_mel - mean_over_time
         
         # 2. Subtract row-wise mean (frame-wise centering):
-        # Shifts values into positive and negative space to center correlation at 0.0.
         frame_means = np.mean(cms_mel, axis=1, keepdims=True)
         centered = cms_mel - frame_means
         
         # 3. Frame-wise L2 Normalization:
-        # Standardizes every frame to unit length. This enforces strict temporal sequence shape
-        # matching, preventing loud high-pitched clicks/vowels from dominating the overall score.
         norms = np.linalg.norm(centered, axis=1, keepdims=True) + 1e-9
         normalized = centered / norms
         
@@ -186,7 +182,6 @@ class AudioMatcher:
             return 0.0, False
             
         # 1. Voice Activity Detection (VAD) Energy Gate:
-        # Ignore calculations during silence.
         live_rms = np.sqrt(np.mean(live_audio_window**2))
         if live_rms < 0.0015 or live_rms < 0.03 * self.target_rms:
             return 0.0, False
@@ -202,33 +197,28 @@ class AudioMatcher:
             
         # 3. Sliding-window average frame correlation search with local temporal jitter
         max_similarity = -1.0
-        jitter = 1 # allows a local shift of +/- 1 frame (~10ms) for speech rate robustness
+        jitter = 1
         
         step = max(1, (T_live - T_target) // 12)
         for offset in range(0, T_live - T_target + 1, step):
             live_sub = live_features[offset : offset + T_target, :]
             
-            # Since live_sub L2 frame norms might have drifted during window CMS,
-            # we re-normalize each live slice frame to unit norm to ensure perfect dot-product cosine similarity
             live_sub_centered = live_sub - np.mean(live_sub, axis=1, keepdims=True)
             norms = np.linalg.norm(live_sub_centered, axis=1, keepdims=True) + 1e-9
             live_sub_normalized = live_sub_centered / norms
             
             frame_scores = []
             for t in range(T_target):
-                # Local temporal search range to absorb timing jitter
                 t_min = max(0, t - jitter)
                 t_max = min(T_target - 1, t + jitter)
                 
                 best_frame_sim = -1.0
                 for tj in range(t_min, t_max + 1):
-                    # Dot product of unit vectors is the cosine similarity (Pearson Correlation)
                     sim = np.dot(live_sub_normalized[t, :], self.target_features[tj, :])
                     if sim > best_frame_sim:
                         best_frame_sim = sim
                 frame_scores.append(best_frame_sim)
                 
-            # Average frame-wise correlation score across the entire timeline
             mean_score = float(np.mean(frame_scores))
             
             if mean_score > max_similarity:
