@@ -7,7 +7,7 @@
     "sampling_rate": 48000,
     "channels": 1,
 
-    "record_interval": 300,
+    "record_interval": 10,
     "recordings_dir": "./recordings",
     "recording_enabled": true,
     "force_discover": false,
@@ -16,7 +16,7 @@
     
     "audio_matching_enabled": true,
     "audio_matching_threshold": 0.45,
-    "audio_matching_target_path": "./recording_b7MVSqRi.wav",
+    "audio_matching_target_path": "/workspace/recording_b7MVSqRi.wav",
 
     "run_on_video": false,
     "video_input_path": "/home/wot-rishabh/Rishabh/Working/R&D/Camera_and_voice/streaming_workspace/recordings_1/rec_20260601_180226.mp4",

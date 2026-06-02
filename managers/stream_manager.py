@@ -381,24 +381,44 @@ class StreamManager:
         is_matched = False
         frame = first_frame
         
+        delay = 1.0 / self.fps
+        last_log_time = 0.0
+        
         try:
             frame_idx = 0
             while True:
+                start_time = time.time()
+                
+                # Fetch latest frame from the video stream
+                new_frame = self.video_stream.read()
+                if new_frame is not None:
+                    frame = new_frame
+                
                 frame_idx += 1
                 if self.hud_recorder:
                     self.hud_recorder.write_frame(frame)
                     self.hud_recorder.tick(frame)
                 
                 if self.matching_enabled and self.audio_receiver and self.audio_matcher:
-                    query_sec = self.audio_matcher.target_duration + 1.0
-                    live_audio_window = self.audio_receiver.get_audio_window(query_sec)
-                    current_score, is_matched = self.audio_matcher.match_live_audio(live_audio_window)
-                    if is_matched:
-                        print(f"\n>>> [MATCH DETECTED] Correlation: {current_score:.2f} <<<")
-                        
-                fps_val = self.video_stream.get_fps()
-                print(f"\rStreaming live :: FPS: {fps_val:.1f} | Match Correlation: {current_score:.2f} | Audio capture active.", end="")
-                time.sleep(1.0)
+                    # Match every 3 frames to save CPU, same as in interactive mode
+                    if frame_idx % 3 == 0:
+                        query_sec = self.audio_matcher.target_duration + 1.0
+                        live_audio_window = self.audio_receiver.get_audio_window(query_sec)
+                        current_score, is_matched = self.audio_matcher.match_live_audio(live_audio_window)
+                        if is_matched:
+                            print(f"\n>>> [MATCH DETECTED] Correlation: {current_score:.2f} <<<")
+                
+                # Log once per second to prevent stdout spam
+                now = time.time()
+                if now - last_log_time >= 1.0:
+                    fps_val = self.video_stream.get_fps()
+                    print(f"\rStreaming live :: FPS: {fps_val:.1f} | Match Correlation: {current_score:.2f} | Audio capture active.", end="", flush=True)
+                    last_log_time = now
+                
+                # Regulate frame rate
+                elapsed = time.time() - start_time
+                sleep_time = max(0.001, delay - elapsed)
+                time.sleep(sleep_time)
         except KeyboardInterrupt:
             print("\n[Headless] Shutting down gracefully...")
 

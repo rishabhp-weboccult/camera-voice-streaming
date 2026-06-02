@@ -25,7 +25,6 @@ class OpenCVVideoStream:
         self.cap = None
         self.frame = None
         self.stopped = False
-        self.lock = threading.Lock()
         self.thread = None
         
         # Performance metrics
@@ -71,9 +70,8 @@ class OpenCVVideoStream:
                 time.sleep(0.05)
                 continue
                 
-            with self.lock:
-                self.frame = frame
-                self.frame_count += 1
+            self.frame = frame
+            self.frame_count += 1
                 
             # Compute FPS every 15 frames
             if self.frame_count % 15 == 0:
@@ -81,9 +79,8 @@ class OpenCVVideoStream:
                 self.current_fps = self.frame_count / elapsed
 
     def read(self):
-        """Returns a thread-safe copy of the most recent frame."""
-        with self.lock:
-            return self.frame.copy() if self.frame is not None else None
+        """Returns the most recent frame."""
+        return self.frame
 
     def get_fps(self):
         """Returns the calculated real-time capture FPS."""
@@ -113,7 +110,6 @@ class VirtualVideoStream:
         self.cap = None
         self.frame = None
         self.stopped = False
-        self.lock = threading.Lock()
         self.thread = None
         
         self.current_fps = 0.0
@@ -163,9 +159,8 @@ class VirtualVideoStream:
                     time.sleep(0.1)
                     continue
                     
-            with self.lock:
-                self.frame = frame
-                self.frame_count += 1
+            self.frame = frame
+            self.frame_count += 1
                 
             if self.frame_count % 15 == 0:
                 elapsed = time.time() - self.start_time
@@ -177,9 +172,8 @@ class VirtualVideoStream:
             time.sleep(sleep_time)
 
     def read(self):
-        """Returns a thread-safe copy of the most recent video frame."""
-        with self.lock:
-            return self.frame.copy() if self.frame is not None else None
+        """Returns the most recent video frame."""
+        return self.frame
 
     def get_fps(self):
         """Returns the calculated virtual stream FPS."""
