@@ -1,0 +1,12 @@
+{
+    "video_device": "/dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._USB_2.0_Camera-video-index0",
+    "alsa_device": "hw:1,0",
+    "video_size": "1280x720",
+    "video_fps": 15,
+    "sampling_rate": 48000,
+    "channels": 1,
+    "record_interval": 10,
+    "recordings_dir": "./recordings",
+    "force_discover": false,
+    "__meta__": "Configuration profile loaded from config.json instead of .env. Modify values to change defaults."
+}
