@@ -55,6 +55,7 @@ class OpenCVVideoStream:
             
         self.stopped = False
         self.start_time = time.time()
+        self.last_fps_time = self.start_time
         self.frame_count = 0
         
         self.thread = threading.Thread(target=self._update, name="VideoStreamThread", daemon=True)
@@ -75,8 +76,11 @@ class OpenCVVideoStream:
                 
             # Compute FPS every 15 frames
             if self.frame_count % 15 == 0:
-                elapsed = time.time() - self.start_time
-                self.current_fps = self.frame_count / elapsed
+                now = time.time()
+                elapsed = now - self.last_fps_time
+                if elapsed > 0:
+                    self.current_fps = 15.0 / elapsed
+                self.last_fps_time = now
 
     def read(self):
         """Returns the most recent frame."""
@@ -135,6 +139,7 @@ class VirtualVideoStream:
         ret, self.frame = self.cap.read()
         self.stopped = False
         self.start_time = time.time()
+        self.last_fps_time = self.start_time
         self.frame_count = 0
         
         self.thread = threading.Thread(target=self._update, name="VirtualVideoStreamThread", daemon=True)
@@ -163,8 +168,11 @@ class VirtualVideoStream:
             self.frame_count += 1
                 
             if self.frame_count % 15 == 0:
-                elapsed = time.time() - self.start_time
-                self.current_fps = self.frame_count / elapsed
+                now = time.time()
+                elapsed = now - self.last_fps_time
+                if elapsed > 0:
+                    self.current_fps = 15.0 / elapsed
+                self.last_fps_time = now
                 
             # Regulate frame rate
             elapsed_frame = time.time() - start_frame_time

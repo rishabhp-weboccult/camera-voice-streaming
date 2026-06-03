@@ -50,8 +50,8 @@ RUN conda init bash
 # 3. Create Conda Env
 # --------------------------
 RUN conda create -n docker_gpu_env python=3.8 -y
-COPY requirements.txt /workspace/requirements.txt
-COPY wheels /workspace/wheels
+COPY requirements.txt /app/workspace/requirements.txt
+COPY wheels /app/workspace/wheels
 # --------------------------
 # 4. Install Python deps
 # --------------------------
@@ -60,13 +60,13 @@ RUN source $CONDA_DIR/etc/profile.d/conda.sh && \
     conda activate docker_gpu_env && \
     pip install --upgrade pip && \
     # pip install /workspace/wheels/cloudbox-1.0.1-py3-none-any.whl && \
-    pip install /workspace/wheels/onnxruntime_gpu-1.16.0-cp38-cp38-linux_aarch64.whl && \
-    pip install /workspace/wheels/onnxsim-0.4.36-cp38-cp38-linux_aarch64.whl && \
+    pip install /app/workspace/wheels/onnxruntime_gpu-1.16.0-cp38-cp38-linux_aarch64.whl && \
+    pip install /app/workspace/wheels/onnxsim-0.4.36-cp38-cp38-linux_aarch64.whl && \
     pip install onnx==1.16.0 && \
-    pip install --no-cache-dir -r /workspace/requirements.txt
+    pip install --no-cache-dir -r /app/workspace/requirements.txt
 
 # 6. Copy project files
-COPY . /workspace
+COPY . /app/workspace
 
 # CMD ["python", "inference.py"]
 

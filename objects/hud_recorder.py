@@ -32,7 +32,7 @@ class OpenCVHUDRecorder:
     """
     def __init__(self, alsa_device, sample_rate=48000, channels=1, 
                  width=1280, height=720, fps=15, interval=10, output_dir="./recordings",
-                 audio_receiver=None):
+                 audio_receiver=None, cleanup_enabled=True, max_size_mb=1000.0):
         self.alsa_device = alsa_device
         self.sample_rate = sample_rate
         self.channels = channels
@@ -42,6 +42,8 @@ class OpenCVHUDRecorder:
         self.interval = interval
         self.output_dir = os.path.abspath(output_dir)
         self.audio_receiver = audio_receiver
+        self.cleanup_enabled = cleanup_enabled
+        self.max_size_mb = max_size_mb
         
         # Check if we should extract virtual audio track from the VirtualAudioReceiver
         # Using string name checking prevents circular import dependencies
@@ -195,6 +197,48 @@ class OpenCVHUDRecorder:
         t.start()
         self.threads.append(t)
 
+    def cleanup_old_recordings(self):
+        """
+        Calculates the total size of files directly under the output recordings directory.
+        If it exceeds max_size_mb, deletes the oldest files until the size is under the threshold.
+        """
+        if not self.cleanup_enabled:
+            return
+
+        try:
+            max_size_bytes = self.max_size_mb * 1024 * 1024
+            
+            # Gather files directly under output_dir (skip directories like 'temp')
+            files = []
+            total_size = 0
+            for entry in os.scandir(self.output_dir):
+                if entry.is_file():
+                    stat = entry.stat()
+                    files.append({
+                        "path": entry.path,
+                        "size": stat.st_size,
+                        "mtime": stat.st_mtime
+                    })
+                    total_size += stat.st_size
+            
+            # If total size exceeds max size limit, delete oldest files first
+            if total_size > max_size_bytes:
+                # Sort by modification time ascending (oldest first)
+                files.sort(key=lambda x: x["mtime"])
+                
+                print(f"\n[Recorder Cleanup] Current folder size: {total_size / (1024*1024):.2f} MB. Threshold: {self.max_size_mb:.2f} MB.")
+                for f in files:
+                    if total_size <= max_size_bytes:
+                        break
+                    try:
+                        os.remove(f["path"])
+                        total_size -= f["size"]
+                        print(f"[Recorder Cleanup] Deleted old recording: {os.path.basename(f['path'])} ({f['size'] / (1024*1024):.2f} MB)")
+                    except Exception as ex:
+                        print(f"[Recorder Cleanup] ERROR deleting file {f['path']}: {ex}", file=sys.stderr)
+        except Exception as e:
+            print(f"[Recorder Cleanup] ERROR during folder scan: {e}", file=sys.stderr)
+
     def _merge_chunk(self, video_path, audio_path, final_path):
         """Synchronizes and muxes the video and audio chunks together using ffmpeg."""
         audio_ok = os.path.exists(audio_path) and os.path.getsize(audio_path) > 0
@@ -206,6 +250,7 @@ class OpenCVHUDRecorder:
                 shutil.copy2(video_path, final_path)
                 if os.path.exists(video_path):
                     os.remove(video_path)
+                self.cleanup_old_recordings()
             except Exception as e:
                 print(f"[Recorder] ERROR during video-only copy fallback: {e}", file=sys.stderr)
             return
@@ -227,12 +272,14 @@ class OpenCVHUDRecorder:
                     os.remove(video_path)
                 if os.path.exists(audio_path):
                     os.remove(audio_path)
+                self.cleanup_old_recordings()
             else:
                 print(f"\n[Recorder] WARNING: ffmpeg merge failed (code {res.returncode}). Falling back to video-only...")
                 import shutil
                 shutil.copy2(video_path, final_path)
                 if os.path.exists(video_path):
                     os.remove(video_path)
+                self.cleanup_old_recordings()
         except Exception as e:
             print(f"\n[Recorder] ERROR background muxing chunk: {e}", file=sys.stderr)
 

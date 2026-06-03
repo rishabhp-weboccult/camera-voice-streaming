@@ -45,6 +45,8 @@ def setup_first_run():
         "record_interval": 10,
         "recordings_dir": "./recordings",
         "recording_enabled": True,
+        "recording_cleanup_enabled": True,
+        "max_recordings_size_mb": 1000.0,
         "force_discover": False,
         "show_window": True,
         "audio_matching_enabled": True,
@@ -52,6 +54,23 @@ def setup_first_run():
         "audio_matching_target_path": "/home/wot-rishabh/Downloads/recording.wav",
         "run_on_video": False,
         "video_input_path": "/home/wot-rishabh/Downloads/video_file.mp4",
+        "detection_enabled": True,
+        "vehicle_stationary_logic_enabled": True,
+        "overlay_hud_on_frame": True,
+        "stop_class_name": "stop",
+        "required_stop_time": 1.0,
+        "flow_threshold": 0.5,
+        "flow_skip": 3,
+        "model_path": "MODEL/v2-yolov8n-det-480-20260501-datav1.onnx",
+        "conf_threshold": 0.25,
+        "iou_threshold": 0.45,
+        "providers": [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider"
+        ],
+        "classes": {
+            "0": "stop"
+        },
         "__meta__": "Configuration profile loaded from config.json. Modify values to change defaults."
     }
     
