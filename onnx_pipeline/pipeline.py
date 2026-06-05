@@ -189,6 +189,44 @@ class YOLOv8Detector:
         
         return input_tensor, r, (pad_left, pad_top)
 
+    def _preprocess_numpy(self, img: np.ndarray) -> Tuple[np.ndarray, float, Tuple[int, int]]:
+        """
+        Fast OpenCV-based letterboxing and preprocessing for NumPy arrays.
+        Avoids PIL conversion overhead entirely.
+        """
+        import cv2
+        h, w = img.shape[:2]
+        
+        # Calculate aspect ratio scaling factor
+        r = min(self.input_width / w, self.input_height / h)
+        new_w = int(round(w * r))
+        new_h = int(round(h * r))
+        
+        # Resize image using OpenCV
+        if (new_w, new_h) != (w, h):
+            resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        else:
+            resized = img
+            
+        # Pad the resized image to the model input size
+        pad_left = (self.input_width - new_w) // 2
+        pad_top = (self.input_height - new_h) // 2
+        
+        # Create canvas filled with padding color (114, 114, 114)
+        canvas = np.full((self.input_height, self.input_width, 3), 114, dtype=np.uint8)
+        canvas[pad_top:pad_top + new_h, pad_left:pad_left + new_w] = resized
+        
+        # Convert to float32, normalize to [0, 1]
+        img_arr = canvas.astype(np.float32) / 255.0
+        
+        # Transpose from HWC to CHW format: [3, H, W]
+        img_arr = img_arr.transpose(2, 0, 1)
+        
+        # Add batch dimension: [1, 3, H, W]
+        input_tensor = np.expand_dims(img_arr, axis=0)
+        
+        return input_tensor, r, (pad_left, pad_top)
+
     def _nms(self, boxes: np.ndarray, scores: np.ndarray, iou_threshold: float) -> List[int]:
         """
         Vectorized Non-Maximum Suppression (NMS) in NumPy.
@@ -332,23 +370,23 @@ class YOLOv8Detector:
         Returns:
             detections: List of Detection instances.
         """
-        # Parse different input types to a PIL Image
-        if isinstance(image_input, str):
-            if not os.path.exists(image_input):
-                raise FileNotFoundError(f"Input image file not found: {image_input}")
-            image = Image.open(image_input).convert("RGB")
-        elif isinstance(image_input, np.ndarray):
-            image = Image.fromarray(image_input).convert("RGB")
-        elif isinstance(image_input, Image.Image):
-            image = image_input.convert("RGB")
+        if isinstance(image_input, np.ndarray):
+            # Fast-path for NumPy arrays (OpenCV frames)
+            original_size = (image_input.shape[1], image_input.shape[0])
+            input_tensor, ratio, padding = self._preprocess_numpy(image_input)
         else:
-            raise TypeError("Unsupported image input type. Use file path (str), PIL Image, or NumPy array.")
+            # Fallback for PIL Image or file path
+            if isinstance(image_input, str):
+                if not os.path.exists(image_input):
+                    raise FileNotFoundError(f"Input image file not found: {image_input}")
+                image = Image.open(image_input).convert("RGB")
+            elif isinstance(image_input, Image.Image):
+                image = image_input.convert("RGB")
+            else:
+                raise TypeError("Unsupported image input type. Use file path (str), PIL Image, or NumPy array.")
+            original_size = image.size
+            input_tensor, ratio, padding = self._preprocess(image)
             
-        original_size = image.size
-        
-        # Preprocessing: scales and applies padding
-        input_tensor, ratio, padding = self._preprocess(image)
-        
         # Inference execution
         outputs = self.session.run(None, {self.input_name: input_tensor})
         

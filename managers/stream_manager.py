@@ -351,7 +351,7 @@ class StreamManager:
         cv2.rectangle(overlay_box, (box_x1, box_y1), (box_x2, box_y2), (10, 10, 10), -1)
         cv2.addWeighted(overlay_box, 0.6, frame, 0.4, 0, frame)
         
-        match_active = (time.time() - last_match_time) < match_cooldown_sec
+        match_active = (time.time() - last_match_time) < match_cooldown_sec and current_score >= self.matching_threshold
         
         if not self.matching_enabled:
             cv2.rectangle(frame, (box_x1, box_y1), (box_x2, box_y2), (50, 50, 50), 1)
@@ -489,8 +489,8 @@ class StreamManager:
                             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                             if prev_gray is not None:
                                 h_small, w_small = prev_gray[roi_y:, roi_x1:roi_x2].shape[:2]
-                                prev_small = cv2.resize(prev_gray[roi_y:, roi_x1:roi_x2], (w_small // 2, h_small // 2))
-                                gray_small = cv2.resize(gray[roi_y:, roi_x1:roi_x2], (w_small // 2, h_small // 2))
+                                prev_small = cv2.resize(prev_gray[roi_y:, roi_x1:roi_x2], (w_small // 4, h_small // 4))
+                                gray_small = cv2.resize(gray[roi_y:, roi_x1:roi_x2], (w_small // 4, h_small // 4))
                                 
                                 flow = cv2.calcOpticalFlowFarneback(
                                     prev_small, gray_small,
@@ -668,8 +668,8 @@ class StreamManager:
                             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                             if prev_gray is not None:
                                 h_small, w_small = prev_gray[roi_y:, roi_x1:roi_x2].shape[:2]
-                                prev_small = cv2.resize(prev_gray[roi_y:, roi_x1:roi_x2], (w_small // 2, h_small // 2))
-                                gray_small = cv2.resize(gray[roi_y:, roi_x1:roi_x2], (w_small // 2, h_small // 2))
+                                prev_small = cv2.resize(prev_gray[roi_y:, roi_x1:roi_x2], (w_small // 4, h_small // 4))
+                                gray_small = cv2.resize(gray[roi_y:, roi_x1:roi_x2], (w_small // 4, h_small // 4))
                                 
                                 flow = cv2.calcOpticalFlowFarneback(
                                     prev_small, gray_small,

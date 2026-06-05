@@ -4,6 +4,7 @@ import sys
 import time
 import subprocess
 import threading
+import queue
 from datetime import datetime
 import numpy as np
 
@@ -63,6 +64,11 @@ class OpenCVHUDRecorder:
         # Keep track of active background threads
         self.threads = []
         self.written_frames = 0
+        
+        # Asynchronous frame writing queue
+        self.frame_queue = queue.Queue()
+        self.writer_thread = None
+        self.stopped = False
 
     def start(self):
         """Starts recording the first chunk."""
@@ -81,6 +87,12 @@ class OpenCVHUDRecorder:
         self.video_writer = cv2.VideoWriter(
             self.temp_video_path, fourcc, self.fps, (self.width, self.height)
         )
+        
+        # Start background writer thread
+        self.stopped = False
+        self.frame_queue = queue.Queue()
+        self.writer_thread = threading.Thread(target=self._writer_loop, name="HUDRecorderWriterThread", daemon=True)
+        self.writer_thread.start()
         
         # 2. Setup Audio Channel
         temp_audio_name = f"temp_audio_{self.current_batch_id}.wav"
@@ -113,10 +125,10 @@ class OpenCVHUDRecorder:
 
     def write_frame(self, frame):
         """
-        Writes a visual frame to the active VideoWriter, regulated by real-world timestamps
+        Queues a visual frame for writing in background thread, regulated by real-world timestamps
         to ensure perfect synchronization with the audio stream.
         """
-        if self.video_writer and self.video_writer.isOpened():
+        if self.video_writer and self.video_writer.isOpened() and not self.stopped:
             now = time.time()
             elapsed = now - self.chunk_start_time
             expected_frames = int(elapsed * self.fps)
@@ -127,9 +139,21 @@ class OpenCVHUDRecorder:
                 if w != self.width or h != self.height:
                     frame = cv2.resize(frame, (self.width, self.height))
                 
+                frame_copy = frame.copy()
                 for _ in range(frames_to_write):
-                    self.video_writer.write(frame)
+                    self.frame_queue.put(frame_copy)
                     self.written_frames += 1
+
+    def _writer_loop(self):
+        """Background thread that pops frames from the queue and writes them to the VideoWriter."""
+        while not self.stopped or not self.frame_queue.empty():
+            try:
+                frame = self.frame_queue.get(timeout=0.05)
+                if self.video_writer and self.video_writer.isOpened():
+                    self.video_writer.write(frame)
+                self.frame_queue.task_done()
+            except queue.Empty:
+                continue
 
     def tick(self, current_frame):
         """
@@ -169,6 +193,10 @@ class OpenCVHUDRecorder:
 
     def _rotate_chunk(self, last_frame):
         """Closes current files and opens the next chunk, starting background muxing."""
+        self.stopped = True
+        if self.writer_thread:
+            self.writer_thread.join()
+            
         completed_batch_id = self.current_batch_id
         completed_video_path = self.temp_video_path
         completed_audio_path = self.temp_audio_path
@@ -289,6 +317,10 @@ class OpenCVHUDRecorder:
             return
             
         print("[Recorder] Finalizing active recording chunk...")
+        self.stopped = True
+        if self.writer_thread:
+            self.writer_thread.join()
+            
         if self.video_writer:
             self.video_writer.release()
             

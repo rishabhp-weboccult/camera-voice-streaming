@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from typing import List, Optional
 
 # Import the local Detection dataclass

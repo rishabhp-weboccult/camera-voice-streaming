@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import subprocess
 import time
-import sys
+
 
 def get_sharing_capture_device(alsa_device):
     """

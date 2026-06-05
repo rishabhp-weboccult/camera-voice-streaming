@@ -207,17 +207,14 @@ class AudioMatcher:
             norms = np.linalg.norm(live_sub_centered, axis=1, keepdims=True) + 1e-9
             live_sub_normalized = live_sub_centered / norms
             
+            # Vectorized dot products: shape (T_target, T_target)
+            similarity_matrix = np.dot(live_sub_normalized, self.target_features.T)
+            
             frame_scores = []
             for t in range(T_target):
                 t_min = max(0, t - jitter)
                 t_max = min(T_target - 1, t + jitter)
-                
-                best_frame_sim = -1.0
-                for tj in range(t_min, t_max + 1):
-                    sim = np.dot(live_sub_normalized[t, :], self.target_features[tj, :])
-                    if sim > best_frame_sim:
-                        best_frame_sim = sim
-                frame_scores.append(best_frame_sim)
+                frame_scores.append(np.max(similarity_matrix[t, t_min : t_max + 1]))
                 
             mean_score = float(np.mean(frame_scores))
             
