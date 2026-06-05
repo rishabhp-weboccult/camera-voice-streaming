@@ -66,6 +66,13 @@ config.local.json
 *.tmp
 temp/
 tmp/
+*.wav
+*.mp3
+*.mp4
+*.avi
+*.mkv
+*.pt
+*.onnx
 
 # Node (if applicable)
 node_modules/
@@ -89,9 +96,13 @@ yarn-error.log
 !README.txt
 
 # files
-./recordings/
-./devices.txt
-./my_graph.html
+recordings/
+devices.txt
+my_graph.html
+AUDIO/
+VIDEO/
+MODEL/
+wheels/
 
 
 # Docker (if applicable)

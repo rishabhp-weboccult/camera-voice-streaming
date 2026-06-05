@@ -36,40 +36,55 @@ def setup_first_run():
             
     # Compile Config Profile
     config_data = {
-        "video_device": video_device,
-        "alsa_device": alsa_device,
-        "video_size": "1280x720",
-        "video_fps": 15,
-        "sampling_rate": 48000,
-        "channels": 1,
-        "record_interval": 10,
-        "recordings_dir": "./recordings",
-        "recording_enabled": True,
-        "recording_cleanup_enabled": True,
-        "max_recordings_size_mb": 1000.0,
-        "force_discover": False,
-        "show_window": True,
-        "audio_matching_enabled": True,
-        "audio_matching_threshold": 0.50,
-        "audio_matching_target_path": "/home/wot-rishabh/Downloads/recording.wav",
-        "run_on_video": False,
-        "video_input_path": "/home/wot-rishabh/Downloads/video_file.mp4",
-        "detection_enabled": True,
-        "vehicle_stationary_logic_enabled": True,
-        "overlay_hud_on_frame": True,
-        "stop_class_name": "stop",
-        "required_stop_time": 1.0,
-        "flow_threshold": 0.5,
-        "flow_skip": 3,
-        "model_path": "MODEL/v2-yolov8n-det-480-20260501-datav1.onnx",
-        "conf_threshold": 0.25,
-        "iou_threshold": 0.45,
-        "providers": [
-            "CUDAExecutionProvider",
-            "CPUExecutionProvider"
-        ],
-        "classes": {
-            "0": "stop"
+        "camera": {
+            "video_device": video_device,
+            "video_size": "1280x720",
+            "video_fps": 15,
+            "show_window": True,
+            "force_discover": False
+        },
+        "microphone": {
+            "alsa_device": alsa_device,
+            "sampling_rate": 48000,
+            "channels": 1
+        },
+        "recording": {
+            "record_interval": 10,
+            "recordings_dir": "./recordings",
+            "recording_enabled": True,
+            "recording_cleanup_enabled": True,
+            "max_recordings_size_mb": 1000.0,
+            "overlay_hud_on_frame": True
+        },
+        "audio_matching": {
+            "audio_matching_enabled": True,
+            "audio_matching_threshold": 0.50,
+            "audio_matching_target_path": "/home/wot-rishabh/Downloads/recording.wav"
+        },
+        "simulation": {
+            "run_on_video": False,
+            "video_input_path": "/home/wot-rishabh/Downloads/video_file.mp4"
+        },
+        "model": {
+            "model_path": "",
+            "image_size": [640, 640],
+            "conf_threshold": 0.25,
+            "iou_threshold": 0.45,
+            "providers": [
+                "CUDAExecutionProvider",
+                "CPUExecutionProvider"
+            ],
+            "classes": {
+                "0": "stop"
+            },
+            "detection_enabled": True
+        },
+        "safety_logic": {
+            "vehicle_stationary_logic_enabled": True,
+            "stop_class_name": "stop",
+            "required_stop_time": 1.0,
+            "flow_threshold": 0.5,
+            "flow_skip": 3
         },
         "__meta__": "Configuration profile loaded from config.json. Modify values to change defaults."
     }
@@ -91,11 +106,11 @@ def load_config():
     try:
         with open(CONFIG_PATH, "r") as f:
             config = json.load(f)
-            required_keys = ["video_device", "alsa_device", "video_size", "video_fps", "sampling_rate", "channels"]
-            if all(k in config for k in required_keys):
+            required_sections = ["camera", "microphone", "recording", "audio_matching", "simulation", "model", "safety_logic"]
+            if all(s in config for s in required_sections):
                 return config
             else:
-                print("[Config] WARNING: config.json is missing required keys. Re-initializing...", file=sys.stderr)
+                print("[Config] WARNING: config.json is missing required sections. Re-initializing...", file=sys.stderr)
                 return setup_first_run()
     except Exception as e:
         print(f"[Config] Error loading config.json: {e}. Re-initializing...", file=sys.stderr)

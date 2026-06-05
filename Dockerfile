@@ -1,6 +1,7 @@
 # CHANGE THIS TO linux/amd64 IF YOU ARE USING THE x86_64 WHEEL!
 # FROM --platform=linux/arm64 python:3.10-slim
 FROM nvcr.io/nvidia/l4t-jetpack:r35.2.1
+# FROM rishabh3671/jetson-base:latest
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1

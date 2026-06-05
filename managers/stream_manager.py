@@ -24,11 +24,20 @@ class StreamManager:
     def __init__(self, config):
         self.config = config
         
+        # Pull configurations by sub-section
+        camera_cfg = config.get("camera", {})
+        mic_cfg = config.get("microphone", {})
+        rec_cfg = config.get("recording", {})
+        match_cfg = config.get("audio_matching", {})
+        sim_cfg = config.get("simulation", {})
+        model_cfg = config.get("model", {})
+        safety_cfg = config.get("safety_logic", {})
+
         # Configuration parameters
-        self.video_device = config.get("video_device")
-        self.alsa_device = config.get("alsa_device")
-        self.video_size = config.get("video_size", "1280x720")
-        self.show_window = config.get("show_window", True)
+        self.video_device = camera_cfg.get("video_device")
+        self.alsa_device = mic_cfg.get("alsa_device")
+        self.video_size = camera_cfg.get("video_size", "1280x720")
+        self.show_window = camera_cfg.get("show_window", True)
         
         try:
             w_str, h_str = self.video_size.split("x")
@@ -36,21 +45,21 @@ class StreamManager:
         except Exception:
             self.width, self.height = 1280, 720
             
-        self.fps = int(config.get("video_fps", 15))
-        self.sample_rate = int(config.get("sampling_rate", 48000))
-        self.channels = int(config.get("channels", 1))
+        self.fps = int(camera_cfg.get("video_fps", 15))
+        self.sample_rate = int(mic_cfg.get("sampling_rate", 48000))
+        self.channels = int(mic_cfg.get("channels", 1))
         
-        self.record_interval = int(config.get("record_interval", 10))
-        self.recordings_dir = config.get("recordings_dir", "./recordings")
-        self.recording_enabled = config.get("recording_enabled", True)
+        self.record_interval = int(rec_cfg.get("record_interval", 10))
+        self.recordings_dir = rec_cfg.get("recordings_dir", "./recordings")
+        self.recording_enabled = rec_cfg.get("recording_enabled", True)
         
-        self.matching_enabled = config.get("audio_matching_enabled", True)
-        self.matching_threshold = float(config.get("audio_matching_threshold", 0.50))
-        self.matching_target_path = config.get("audio_matching_target_path", "/home/wot-rishabh/Downloads/recording.wav")
+        self.matching_enabled = match_cfg.get("audio_matching_enabled", True)
+        self.matching_threshold = float(match_cfg.get("audio_matching_threshold", 0.50))
+        self.matching_target_path = match_cfg.get("audio_matching_target_path", "/home/wot-rishabh/Downloads/recording.wav")
         
         # Video file simulation parameters
-        self.run_on_video = config.get("run_on_video", False)
-        self.video_input_path = config.get("video_input_path", "")
+        self.run_on_video = sim_cfg.get("run_on_video", False)
+        self.video_input_path = sim_cfg.get("video_input_path", "")
         self.audio_monitor_process = None
         
         # Application entities
@@ -62,16 +71,22 @@ class StreamManager:
         self.audio_matcher = None
         
         # Detection & Stop Sign Logic parameters
-        self.detection_enabled = config.get("detection_enabled", True)
-        self.vehicle_stationary_logic_enabled = config.get("vehicle_stationary_logic_enabled", True)
-        self.overlay_hud_on_frame = config.get("overlay_hud_on_frame", True)
-        self.recording_cleanup_enabled = config.get("recording_cleanup_enabled", True)
-        self.max_recordings_size_mb = float(config.get("max_recordings_size_mb", 1000.0))
+        self.detection_enabled = model_cfg.get("detection_enabled", True)
+        self.vehicle_stationary_logic_enabled = safety_cfg.get("vehicle_stationary_logic_enabled", True)
+        self.overlay_hud_on_frame = rec_cfg.get("overlay_hud_on_frame", True)
+        self.recording_cleanup_enabled = rec_cfg.get("recording_cleanup_enabled", True)
+        self.max_recordings_size_mb = float(rec_cfg.get("max_recordings_size_mb", 1000.0))
         self.detector = None
         self.stop_sign_logic = None
 
         self.window_name = "Camera & Voice - High Performance Streamer"
         self.screenshots_dir = "./screenshots"
+        
+        # Performance metrics
+        self.current_full_fps = 0.0
+        self.current_det_fps = 0.0
+        self.full_frame_count = 0
+        self.last_full_fps_time = time.time()
         
     def start_session(self):
         """Prepares resources, clears hardware locks or starts video file demuxers."""
@@ -83,8 +98,9 @@ class StreamManager:
                 print("[Detection] Detector initialized successfully!")
                 
                 # Initialize stop sign logic
-                stop_class_name = self.config.get("stop_class_name", "stop")
-                required_stop_time = float(self.config.get("required_stop_time", 1.0))
+                safety_cfg = self.config.get("safety_logic", {})
+                stop_class_name = safety_cfg.get("stop_class_name", "stop")
+                required_stop_time = float(safety_cfg.get("required_stop_time", 1.0))
                 self.stop_sign_logic = StopSignLogic(
                     stop_class_name=stop_class_name,
                     required_stop_time=required_stop_time
@@ -277,26 +293,31 @@ class StreamManager:
         roi_x2,
         w,
         h,
-        show_controls=True
+        show_controls=True,
+        full_fps=None,
+        detection_fps=None
     ):
         """Draws all HUD overlays onto the frame."""
+
+        fps_val = full_fps if full_fps is not None else self.video_stream.get_fps()
 
         # 1. Run YOLO detections overlay (Safety HUD, boxes)
         if self.detection_enabled and self.detector:
             frame = self.detector._draw_detections_cv2(
                 frame=frame,
                 detections=detections,
-                fps=self.video_stream.get_fps(),
+                fps=fps_val,
                 logic_status=logic_status,
                 timestamp=timestamp,
                 is_stationary=is_stationary if self.vehicle_stationary_logic_enabled else None,
-                required_stop_time=self.config.get("required_stop_time", 1.0),
+                required_stop_time=self.config.get("safety_logic", {}).get("required_stop_time", 1.0),
                 flow_mag=flow_mag if self.vehicle_stationary_logic_enabled else 0.0,
                 roi_x1=roi_x1,
                 roi_y=roi_y,
                 roi_x2=roi_x2,
                 height=h,
-                y_offset=60
+                y_offset=60,
+                detection_fps=detection_fps
             )
 
         # 2. Draw Semi-transparent Header Overlay
@@ -307,7 +328,7 @@ class StreamManager:
         # Pulse status badge
         cv2.circle(frame, (20, 28), 6, (0, 255, 0), -1)
         
-        fps_val = self.video_stream.get_fps()
+        fps_val = full_fps if full_fps is not None else self.video_stream.get_fps()
         time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         cv2.putText(frame, "LIVE REC", (35, 33), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
@@ -384,7 +405,8 @@ class StreamManager:
         if self.record_interval > 0:
             print(f"  * MP4 Chunk Recording Active (Interval: {self.record_interval}s) *")
         if self.detection_enabled:
-            print(f"  * YOLOv8 Object Detection Active (Model: {os.path.basename(self.config.get('model_path', ''))}) *")
+            model_cfg = self.config.get("model", {})
+            print(f"  * YOLOv8 Object Detection Active (Model: {os.path.basename(model_cfg.get('model_path', ''))}) *")
             print(f"  * Stationary Logic: {'ENABLED' if self.vehicle_stationary_logic_enabled else 'DISABLED'} *")
         print("----------------------------\n")
         
@@ -397,8 +419,9 @@ class StreamManager:
         # Optical Flow states
         prev_gray = None
         flow_mag = 0.0
-        flow_skip = int(self.config.get("flow_skip", 3))
-        flow_threshold = float(self.config.get("flow_threshold", 0.5))
+        safety_cfg = self.config.get("safety_logic", {})
+        flow_skip = int(safety_cfg.get("flow_skip", 3))
+        flow_threshold = float(safety_cfg.get("flow_threshold", 0.5))
         
         roi_calculated = False
         roi_y = 0
@@ -406,6 +429,8 @@ class StreamManager:
         roi_x2 = 0
         
         loop_start_time = time.time()
+        self.last_full_fps_time = time.time()
+        self.full_frame_count = 0
         
         try:
             while True:
@@ -422,6 +447,15 @@ class StreamManager:
                     roi_calculated = True
 
                 frame_idx += 1
+
+                # Update full loop FPS
+                self.full_frame_count += 1
+                if self.full_frame_count % 15 == 0:
+                    now_time = time.time()
+                    elapsed_full = now_time - self.last_full_fps_time
+                    if elapsed_full > 0:
+                        self.current_full_fps = 15.0 / elapsed_full
+                    self.last_full_fps_time = now_time
                 
                 if self.run_on_video:
                     timestamp = frame_idx / self.fps
@@ -436,7 +470,19 @@ class StreamManager:
                 if self.detection_enabled and self.detector and self.stop_sign_logic:
                     # Convert to RGB for detector
                     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    
+                    t_det_start = time.time()
                     detections = self.detector.predict(rgb_frame)
+                    t_det_end = time.time()
+                    
+                    det_elapsed = t_det_end - t_det_start
+                    if not hasattr(self, "_det_latencies"):
+                        self._det_latencies = []
+                    self._det_latencies.append(det_elapsed)
+                    if len(self._det_latencies) > 15:
+                        self._det_latencies.pop(0)
+                    avg_det_latency = sum(self._det_latencies) / len(self._det_latencies)
+                    self.current_det_fps = 1.0 / avg_det_latency if avg_det_latency > 0 else 0.0
                     
                     if self.vehicle_stationary_logic_enabled:
                         if frame_idx % flow_skip == 0 or frame_idx == 1:
@@ -504,7 +550,9 @@ class StreamManager:
                     roi_x2=roi_x2,
                     w=w,
                     h=h,
-                    show_controls=True
+                    show_controls=True,
+                    full_fps=self.current_full_fps,
+                    detection_fps=self.current_det_fps
                 )
                 
                 # --- 5. Record display frame (with or without HUD depending on overlay_hud_on_frame) ---
@@ -555,14 +603,17 @@ class StreamManager:
         # Optical Flow states
         prev_gray = None
         flow_mag = 0.0
-        flow_skip = int(self.config.get("flow_skip", 3))
-        flow_threshold = float(self.config.get("flow_threshold", 0.5))
+        safety_cfg = self.config.get("safety_logic", {})
+        flow_skip = int(safety_cfg.get("flow_skip", 3))
+        flow_threshold = float(safety_cfg.get("flow_threshold", 0.5))
         
         roi_y = int(h * 0.6)
         roi_x1 = int(w * 0.2)
         roi_x2 = int(w * 0.8)
         
         loop_start_time = time.time()
+        self.last_full_fps_time = time.time()
+        self.full_frame_count = 0
         
         try:
             frame_idx = 0
@@ -575,6 +626,15 @@ class StreamManager:
                     frame = new_frame
                 
                 frame_idx += 1
+
+                # Update full loop FPS
+                self.full_frame_count += 1
+                if self.full_frame_count % 15 == 0:
+                    now_time = time.time()
+                    elapsed_full = now_time - self.last_full_fps_time
+                    if elapsed_full > 0:
+                        self.current_full_fps = 15.0 / elapsed_full
+                    self.last_full_fps_time = now_time
 
                 if self.run_on_video:
                     timestamp = frame_idx / self.fps
@@ -589,7 +649,19 @@ class StreamManager:
                 if self.detection_enabled and self.detector and self.stop_sign_logic:
                     # Convert to RGB for detector
                     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    
+                    t_det_start = time.time()
                     detections = self.detector.predict(rgb_frame)
+                    t_det_end = time.time()
+                    
+                    det_elapsed = t_det_end - t_det_start
+                    if not hasattr(self, "_det_latencies"):
+                        self._det_latencies = []
+                    self._det_latencies.append(det_elapsed)
+                    if len(self._det_latencies) > 15:
+                        self._det_latencies.pop(0)
+                    avg_det_latency = sum(self._det_latencies) / len(self._det_latencies)
+                    self.current_det_fps = 1.0 / avg_det_latency if avg_det_latency > 0 else 0.0
                     
                     if self.vehicle_stationary_logic_enabled:
                         if frame_idx % flow_skip == 0 or frame_idx == 1:
@@ -653,7 +725,9 @@ class StreamManager:
                     roi_x2=roi_x2,
                     w=w,
                     h=h,
-                    show_controls=False
+                    show_controls=False,
+                    full_fps=self.current_full_fps,
+                    detection_fps=self.current_det_fps
                 )
 
                 if self.hud_recorder:
@@ -663,9 +737,10 @@ class StreamManager:
                 # Log once per second to prevent stdout spam
                 now = time.time()
                 if now - last_log_time >= 1.0:
-                    fps_val = self.video_stream.get_fps()
-                    detection_text = f" | Detections: {len(detections)}" if self.detection_enabled else ""
-                    print(f"\rStreaming live :: FPS: {fps_val:.1f} | Match Correlation: {current_score:.2f}{detection_text} | Audio capture active.", end="", flush=True)
+                    fps_val = self.current_full_fps
+                    det_fps_val = self.current_det_fps
+                    detection_text = f" | Det FPS: {det_fps_val:.1f} | Detections: {len(detections)}" if self.detection_enabled else ""
+                    print(f"\rStreaming live :: Full FPS: {fps_val:.1f}{detection_text} | Match Correlation: {current_score:.2f} | Audio capture active.", end="", flush=True)
                     last_log_time = now
                 
                 # Regulate frame rate

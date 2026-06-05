@@ -40,18 +40,19 @@ class YOLOv8Detector:
         else:
             raise TypeError("config_path_or_dict must be a file path (str) or a dictionary")
             
-        # Parse configs with sensible defaults
-        self.model_path = self.config.get("model_path")
+        # Parse configs with sensible defaults from nested model sub-section
+        model_cfg = self.config.get("model", {})
+        self.model_path = model_cfg.get("model_path")
         if not self.model_path:
             raise ValueError("model_path is required in the configuration.")
             
         if not os.path.exists(self.model_path):
             raise FileNotFoundError(f"Model file not found at path: {self.model_path}")
             
-        self.conf_threshold = float(self.config.get("conf_threshold", 0.25))
-        self.iou_threshold = float(self.config.get("iou_threshold", 0.45))
+        self.conf_threshold = float(model_cfg.get("conf_threshold", 0.25))
+        self.iou_threshold = float(model_cfg.get("iou_threshold", 0.45))
         # Select execution providers based on configuration or auto-detection
-        config_providers = self.config.get("providers")
+        config_providers = model_cfg.get("providers")
         if config_providers:
             if isinstance(config_providers, str):
                 config_providers = [config_providers]
@@ -71,7 +72,7 @@ class YOLOv8Detector:
                 self.providers = filtered
                 logger.info(f"Active execution providers: {self.providers}")
         else:
-            self.device = self.config.get("device", "auto")
+            self.device = model_cfg.get("device", "auto")
             self.providers = self._select_providers(self.device)
 
         
@@ -87,10 +88,16 @@ class YOLOv8Detector:
         self.input_name = input_details.name
         input_shape = input_details.shape
         
-        # Parse input resolution (handle static vs dynamic shapes)
-        self.input_height = input_shape[2] if isinstance(input_shape[2], int) else 640
-        self.input_width = input_shape[3] if isinstance(input_shape[3], int) else 640
-        logger.info(f"Model input layer: '{self.input_name}' with resolution: {self.input_width}x{self.input_height}")
+        # Parse input resolution (check config first, then handle static vs dynamic shapes)
+        image_size = model_cfg.get("image_size")
+        if isinstance(image_size, list) and len(image_size) == 2:
+            self.input_height = image_size[0]
+            self.input_width = image_size[1]
+            logger.info(f"Model input layer: override from config image_size: {self.input_width}x{self.input_height}")
+        else:
+            self.input_height = input_shape[2] if isinstance(input_shape[2], int) else 640
+            self.input_width = input_shape[3] if isinstance(input_shape[3], int) else 640
+            logger.info(f"Model input layer: '{self.input_name}' with resolution: {self.input_width}x{self.input_height}")
         
         # Load class names mapping
         self.classes = self._load_classes()
@@ -121,7 +128,8 @@ class YOLOv8Detector:
 
     def _load_classes(self) -> Dict[int, str]:
         """Loads class label mappings from config or falls back to ONNX metadata if unspecified."""
-        classes_config = self.config.get("classes", {})
+        model_cfg = self.config.get("model", {})
+        classes_config = model_cfg.get("classes", {})
         # Map keys to integers
         classes = {int(k): str(v) for k, v in classes_config.items()}
         
@@ -354,7 +362,8 @@ class YOLOv8Detector:
         Determines if the vehicle is stationary at the given timestamp (seconds).
         Supports static booleans and list of [start, end] intervals.
         """
-        val = self.config.get("is_stationary", True)
+        safety_cfg = self.config.get("safety_logic", {})
+        val = safety_cfg.get("is_stationary", True)
         if isinstance(val, bool):
             return val
         if isinstance(val, list):
@@ -405,15 +414,16 @@ class YOLOv8Detector:
                 logger.error(f"Failed to open output video writer for path: {output_path}")
             
         # Initialize Stop Sign compliance logic
-        stop_class_name = self.config.get("stop_class_name", "stop")
-        required_stop_time = float(self.config.get("required_stop_time", 1.0))
+        safety_cfg = self.config.get("safety_logic", {})
+        stop_class_name = safety_cfg.get("stop_class_name", "stop")
+        required_stop_time = float(safety_cfg.get("required_stop_time", 1.0))
         logic = StopSignLogic(stop_class_name, required_stop_time)
         
         # Optical Flow states
         prev_gray = None
         flow_mag = 0.0
-        flow_skip = int(self.config.get("flow_skip", 3))
-        flow_threshold = float(self.config.get("flow_threshold", 0.5))
+        flow_skip = int(safety_cfg.get("flow_skip", 3))
+        flow_threshold = float(safety_cfg.get("flow_threshold", 0.5))
         
         # Region of Interest for Optical Flow (bottom-center area)
         roi_y = int(height * 0.6)
@@ -441,8 +451,13 @@ class YOLOv8Detector:
             # OpenCV loads frame in BGR, convert to RGB for predictions
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             
-            # Predict
+            # Predict & time the detection stage specifically
+            t_det_start = time.time()
             detections = self.predict(rgb_frame)
+            t_det_end = time.time()
+            det_elapsed = t_det_end - t_det_start
+            det_fps_val = 1.0 / det_elapsed if det_elapsed > 0 else 0.0
+            
             all_detections.append(detections)
             
             # Calculate Optical Flow on bottom-center ROI
@@ -463,7 +478,8 @@ class YOLOv8Detector:
                 prev_gray = gray
             
             # Determine vehicle stationary status
-            if "is_stationary" in self.config:
+            safety_cfg = self.config.get("safety_logic", {})
+            if "is_stationary" in safety_cfg:
                 is_stationary = self._check_stationary(timestamp)
             else:
                 is_stationary = flow_mag < flow_threshold
@@ -502,7 +518,8 @@ class YOLOv8Detector:
                     roi_x1=roi_x1,
                     roi_y=roi_y,
                     roi_x2=roi_x2,
-                    height=height
+                    height=height,
+                    detection_fps=det_fps_val
                 )
                 writer.write(annotated_frame)
                 
@@ -527,7 +544,8 @@ class YOLOv8Detector:
         roi_y: int = None,
         roi_x2: int = None,
         height: int = None,
-        y_offset: int = 0
+        y_offset: int = 0,
+        detection_fps: float = None
     ) -> np.ndarray:
         """Draws bounding boxes, labels, and safety logic status dashboard onto a BGR frame."""
         import cv2
@@ -556,10 +574,12 @@ class YOLOv8Detector:
         cv2.line(frame, (20, 35 + y_offset), (370, 35 + y_offset), (100, 100, 100), 1)
         
         # Row 1: FPS and Video Time
-        fps_text = f"FPS: {fps:.1f}" if fps is not None else "FPS: N/A"
+        fps_text = f"Full FPS: {fps:.1f}" if fps is not None else "Full FPS: N/A"
+        det_fps_text = f"Det FPS: {detection_fps:.1f}" if detection_fps is not None else "Det FPS: N/A"
         time_text = f"Time: {timestamp:.2f}s" if timestamp is not None else "Time: N/A"
         cv2.putText(frame, fps_text, (20, 55 + y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
-        cv2.putText(frame, time_text, (180, 55 + y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
+        cv2.putText(frame, det_fps_text, (135, 55 + y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
+        cv2.putText(frame, time_text, (250, 55 + y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
         
         # Row 2: Vehicle Motion State and Flow Magnitude
         if is_stationary is not None:
