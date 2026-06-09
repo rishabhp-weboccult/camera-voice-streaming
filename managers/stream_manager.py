@@ -83,6 +83,9 @@ class StreamManager:
         self.max_recordings_size_mb = float(rec_cfg.get("max_recordings_size_mb", 1000.0))
         self.detector = None
         self.stop_sign_logic = None
+        self.tracker = None
+        self.active_journeys = {}
+        self.last_processed_timestamp = 0.0
 
         self.window_name = "Camera & Voice - High Performance Streamer"
         self.screenshots_dir = "./screenshots"
@@ -120,6 +123,19 @@ class StreamManager:
                 print("\n[Detection] Initializing YOLOv8 ONNX Detector...")
                 self.detector = YOLOv8Detector(self.config)
                 print("[Detection] Detector initialized successfully!")
+                
+                # Initialize BYTETracker
+                from byte_tracker.byte_tracker_model import BYTETracker
+                tracker_cfg = self.config.get("tracker", {})
+                self.tracker = BYTETracker(
+                    fps=self.fps,
+                    first_track_thresh=float(tracker_cfg.get("first_track_thresh", 0.4)),
+                    second_track_thresh=float(tracker_cfg.get("second_track_thresh", 0.1)),
+                    match_thresh=float(tracker_cfg.get("match_thresh", 0.7)),
+                    track_buffer=int(tracker_cfg.get("track_buffer", 30)),
+                    resize_width_height=(self.width, self.height)
+                )
+                self.active_journeys = {}
                 
                 # Initialize stop sign logic
                 safety_cfg = self.config.get("safety_logic", {})
@@ -440,6 +456,49 @@ class StreamManager:
                 if bar_w > 0:
                     cv2.rectangle(frame, (center_x - 140, h - 52), (center_x - 140 + bar_w, h - 48), (255, 180, 50), -1)
         
+        # 5. Draw Active Journeys and Events Tracker Panel
+        x1 = w - 280
+        x2 = w - 10
+        tracker_y = 70
+        panel_h = 55
+        
+        has_journey = False
+        event_conducted = False
+        journey_id_str = ""
+        
+        if hasattr(self, "active_journeys") and self.active_journeys:
+            active_list = list(self.active_journeys.items())
+            if active_list:
+                has_journey = True
+                j_id, j_mem = active_list[0]
+                journey_id_str = f" #{j_id}"
+                if j_mem.get("event_captured"):
+                    event_conducted = True
+
+        # Semi-transparent background
+        overlay_p = frame.copy()
+        cv2.rectangle(overlay_p, (x1, tracker_y), (x2, tracker_y + panel_h), (20, 20, 20), -1)
+        cv2.addWeighted(overlay_p, 0.7, frame, 0.3, 0, frame)
+        
+        # Gray border
+        cv2.rectangle(frame, (x1, tracker_y), (x2, tracker_y + panel_h), (100, 100, 100), 1)
+        
+        # Title / Header
+        cv2.putText(frame, "TRACKER STATUS", (x1 + 10, tracker_y + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.line(frame, (x1 + 10, tracker_y + 24), (x2 - 10, tracker_y + 24), (80, 80, 80), 1)
+        
+        # Journey indicator dot: GREEN if active, RED if inactive
+        j_color = (0, 255, 0) if has_journey else (0, 0, 255)
+        j_text = f"Journey Start{journey_id_str}" if has_journey else "No Active Journey"
+        cv2.circle(frame, (x1 + 20, tracker_y + 38), 5, j_color, -1)
+        cv2.putText(frame, j_text, (x1 + 32, tracker_y + 42), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1, cv2.LINE_AA)
+        
+        # Event indicator dot: GREEN if event conducted, RED otherwise
+        e_color = (0, 255, 0) if event_conducted else (0, 0, 255)
+        e_text = "Event Conducted" if event_conducted else "Event Pending"
+        cv2.circle(frame, (x1 + 150, tracker_y + 38), 5, e_color, -1)
+        cv2.putText(frame, e_text, (x1 + 162, tracker_y + 42), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1, cv2.LINE_AA)
+
         # 4. Draw Footer Instructions
         if show_controls:
             cv2.rectangle(frame, (0, h - 30), (w, h), (30, 30, 30), -1)
@@ -576,10 +635,12 @@ class StreamManager:
                             pass
                 
                 # Retrieve the matched frame and its corresponding detections from the pipeline
+                new_det_ready = False
                 if self.detection_enabled:
                     try:
                         # Blocking read with timeout to keep UI responsive
                         frame, timestamp_det, frame_idx_det, detections = self.det_out_queue.get(timeout=0.1)
+                        new_det_ready = True
                     except queue.Empty:
                         # Fallback if queue is empty: reuse source frame with empty detections
                         frame = img_src.copy()
@@ -591,6 +652,35 @@ class StreamManager:
                     timestamp_det = timestamp
                     frame_idx_det = frame_idx
                     detections = []
+
+                self.last_processed_timestamp = timestamp_det
+
+                # Run BYTETracker
+                draw_detections = detections
+                if self.detection_enabled and new_det_ready and self.tracker:
+                    tracker_inputs = []
+                    for det in detections:
+                        tracker_inputs.append([
+                            det.box[0], det.box[1], det.box[2], det.box[3],
+                            det.confidence, det.class_name
+                        ])
+                    try:
+                        tracked_stracks = self.tracker.update(tracker_inputs)
+                        self._process_journeys_and_events(tracked_stracks, timestamp_det, current_score)
+                        
+                        # Build draw-only tracked detections list (for visualization)
+                        from dataclass.detection import Detection
+                        draw_detections = []
+                        for track in tracked_stracks:
+                            x1, y1, x2, y2 = track.tlbr
+                            draw_detections.append(Detection(
+                                class_id=0,
+                                class_name=f"{track.class_name} #{track.track_id}",
+                                confidence=track.score,
+                                box=[float(x1), float(y1), float(x2), float(y2)]
+                            ))
+                    except Exception as e:
+                        print(f"[Tracker] Error in tracker update: {e}", file=sys.stderr)
                 
                 h, w, _ = frame.shape
                 if not roi_calculated:
@@ -669,7 +759,7 @@ class StreamManager:
                 # --- 2. Draw HUD/overlays on frame for live window display ---
                 frame = self._draw_all_hud_overlays(
                     frame=frame,
-                    detections=detections,
+                    detections=draw_detections,
                     logic_status=logic_status,
                     timestamp=timestamp_det,
                     is_stationary=is_stationary,
@@ -777,10 +867,12 @@ class StreamManager:
                             pass
                 
                 # Retrieve the matched frame and its corresponding detections from the pipeline
+                new_det_ready = False
                 if self.detection_enabled:
                     try:
                         # Blocking read with timeout to keep UI responsive
                         frame, timestamp_det, frame_idx_det, detections = self.det_out_queue.get(timeout=0.1)
+                        new_det_ready = True
                     except queue.Empty:
                         # Fallback if queue is empty: reuse source frame with empty detections
                         frame = img_src.copy()
@@ -792,6 +884,35 @@ class StreamManager:
                     timestamp_det = timestamp
                     frame_idx_det = frame_idx
                     detections = []
+
+                self.last_processed_timestamp = timestamp_det
+
+                # Run BYTETracker
+                draw_detections = detections
+                if self.detection_enabled and new_det_ready and self.tracker:
+                    tracker_inputs = []
+                    for det in detections:
+                        tracker_inputs.append([
+                            det.box[0], det.box[1], det.box[2], det.box[3],
+                            det.confidence, det.class_name
+                        ])
+                    try:
+                        tracked_stracks = self.tracker.update(tracker_inputs)
+                        self._process_journeys_and_events(tracked_stracks, timestamp_det, current_score)
+                        
+                        # Build draw-only tracked detections list (for visualization)
+                        from dataclass.detection import Detection
+                        draw_detections = []
+                        for track in tracked_stracks:
+                            x1, y1, x2, y2 = track.tlbr
+                            draw_detections.append(Detection(
+                                class_id=0,
+                                class_name=f"{track.class_name} #{track.track_id}",
+                                confidence=track.score,
+                                box=[float(x1), float(y1), float(x2), float(y2)]
+                            ))
+                    except Exception as e:
+                        print(f"[Tracker] Error in tracker update: {e}", file=sys.stderr)
 
                 # Update full loop FPS
                 self.full_frame_count += 1
@@ -859,7 +980,7 @@ class StreamManager:
                 # --- 2. Draw HUD/overlays on frame if layout flag is active ---
                 frame = self._draw_all_hud_overlays(
                     frame=frame,
-                    detections=detections,
+                    detections=draw_detections,
                     logic_status=logic_status,
                     timestamp=timestamp_det,
                     is_stationary=is_stationary,
@@ -900,6 +1021,13 @@ class StreamManager:
     def stop_session(self):
         """Cleanly tears down background processes, monitors, streams, and releases locks."""
         print("[Shutdown] Stopping active managers, objects, and hardware handles...")
+        
+        # Finalize all remaining active journeys
+        if hasattr(self, "active_journeys") and self.active_journeys:
+            active_ids = list(self.active_journeys.keys())
+            for j_id in active_ids:
+                self._finalize_journey(j_id)
+                
         self.stopped = True
         
         # Join worker threads
@@ -1015,3 +1143,132 @@ class StreamManager:
             finally:
                 self.flow_queue.task_done()
         print("[OpticalFlow] Background worker thread stopped.")
+
+    def _load_json_file(self, filename):
+        """Loads data from a JSON file in the recordings directory."""
+        import json
+        filepath = os.path.join(self.recordings_dir, filename)
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, "r") as f:
+                    return json.load(f)
+            except Exception:
+                return []
+        return []
+
+    def _save_json_file(self, filename, data):
+        """Saves data to a JSON file in the recordings directory."""
+        import json
+        filepath = os.path.join(self.recordings_dir, filename)
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        try:
+            with open(filepath, "w") as f:
+                json.dump(data, f, indent=4)
+        except Exception as e:
+            print(f"[Error] Failed to save {filename}: {e}", file=sys.stderr)
+
+    def _process_journeys_and_events(self, tracked_stracks, timestamp, current_score):
+        """Processes BYTETracker outputs, manages journeys and events lifecycle, and updates JSON files."""
+        # Get active tracks that are stop signs
+        stop_tracks = [t for t in tracked_stracks if t.class_name == "stop"]
+        current_stop_ids = {int(t.track_id) for t in stop_tracks}
+        
+        # 1. Start new journeys for new stop sign detections
+        for track in stop_tracks:
+            track_id = int(track.track_id)
+            if track_id not in self.active_journeys:
+                # Create journey
+                system_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                self.active_journeys[track_id] = {
+                    "journey_id": track_id,
+                    "start_time": system_time,
+                    "end_time": None,
+                    "event_status": "no event conducted",
+                    "event_captured": False,
+                    "frames_tracked": 1
+                }
+                
+                # Append to journey.json
+                journeys = self._load_json_file("journey.json")
+                if not any(j.get("journey_id") == track_id for j in journeys):
+                    journeys.append({
+                        "journey_id": track_id,
+                        "start_time": system_time,
+                        "end_time": None,
+                        "event_status": "no event conducted"
+                    })
+                    self._save_json_file("journey.json", journeys)
+                    print(f"[Journey] Created new journey for Stop Sign ID: {track_id}")
+            else:
+                # Increment frame count
+                self.active_journeys[track_id]["frames_tracked"] += 1
+                
+            # 2. Check if track is stable, vehicle is stationary, and audio match crosses threshold to trigger event
+            journey = self.active_journeys[track_id]
+            is_stable = journey["frames_tracked"] >= 3
+            
+            is_stationary = True
+            if self.vehicle_stationary_logic_enabled:
+                with self.flow_lock:
+                    is_stationary = self.latest_is_stationary
+                    
+            match_crossed = current_score >= self.matching_threshold
+            
+            if is_stable and is_stationary and match_crossed and not journey["event_captured"]:
+                # Trigger Event
+                journey["event_captured"] = True
+                journey["event_status"] = "conducted"
+                
+                system_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                event_obj = {
+                    "event_id": track_id,  # "u can take the object id only"
+                    "journey_id": track_id,
+                    "timestamp": system_time,
+                    "audio_match_score": float(current_score)
+                }
+                
+                # Append to event.json
+                events = self._load_json_file("event.json")
+                if not any(e.get("event_id") == track_id for e in events):
+                    events.append(event_obj)
+                    self._save_json_file("event.json", events)
+                    print(f"[Event] Captured event for Stop Sign ID: {track_id} (Score: {current_score:.2f})")
+                
+                # Update event_status in journey.json
+                journeys = self._load_json_file("journey.json")
+                for j in journeys:
+                    if j.get("journey_id") == track_id:
+                        j["event_status"] = "conducted"
+                        break
+                self._save_json_file("journey.json", journeys)
+
+        # 3. Handle ended journeys (seen previously but not in current frame)
+        active_ids = list(self.active_journeys.keys())
+        for j_id in active_ids:
+            if j_id not in current_stop_ids:
+                j_mem = self.active_journeys[j_id]
+                j_mem["missed_count"] = j_mem.get("missed_count", 0) + 1
+                if j_mem["missed_count"] >= 15: # allow 15 frames of dropout
+                    self._finalize_journey(j_id)
+            else:
+                if "missed_count" in self.active_journeys[j_id]:
+                    self.active_journeys[j_id]["missed_count"] = 0
+
+    def _finalize_journey(self, journey_id):
+        """Finalizes an active journey, sets its end time and updates the JSON file."""
+        if journey_id in self.active_journeys:
+            j_mem = self.active_journeys[journey_id]
+            system_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            
+            # Load and update journey.json
+            journeys = self._load_json_file("journey.json")
+            for j in journeys:
+                if j.get("journey_id") == journey_id:
+                    j["end_time"] = system_time
+                    j["event_status"] = j_mem["event_status"]
+                    break
+            self._save_json_file("journey.json", journeys)
+            
+            # Remove from active
+            del self.active_journeys[journey_id]
+            print(f"[Journey] Finalized journey for Stop Sign ID: {journey_id} (Status: {j_mem['event_status']})")

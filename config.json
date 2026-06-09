@@ -1,38 +1,38 @@
 {
     "camera": {
-        "video_device": "/dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._USB_2.0_Camera-video-index0",
+        "video_device": "/dev/v4l/by-id/usb-XCX_Backlight_XCX-S58M21_200901010001-video-index0",
         "video_size": "1280x720",
         "video_fps": 30,
         "show_window": true,
         "force_discover": false
     },
     "microphone": {
-        "alsa_device": "hw:3,0",
+        "alsa_device": "hw:1,0",
         "sampling_rate": 48000,
         "channels": 1
     },
     "recording": {
         "record_interval": 18,
-        "recordings_dir": "/app/workspace/recordings",
+        "recordings_dir": "./recordings",
         "recording_enabled": true,
         "recording_cleanup_enabled": true,
-        "max_recordings_size_mb": 2000.0,
+        "max_recordings_size_mb": 3000.0,
         "overlay_hud_on_frame": true,
         "save_telemetry_csv": true
     },
     "audio_matching": {
         "audio_matching_enabled": true,
         "audio_matching_threshold": 0.45,
-        "audio_matching_target_path": "/app/workspace/AUDIO/ok.wav"
+        "audio_matching_target_path": "AUDIO/ok.wav"
     },
     "simulation": {
         "run_on_video": false,
-        "video_input_path": "/app/workspace/VIDEO/OK1_1.mp4"
+        "video_input_path": "VIDEO/OK1_1.mp4"
     },
     "model": {
-        "model_path": "/app/workspace/MODEL/v2-yolov8n-det-480-20260501-datav1.onnx",
+        "model_path": "MODEL/v2-yolov8n-det-480-20260501-datav1.onnx",
         "image_size": [480, 480],
-        "conf_threshold": 0.40,
+        "conf_threshold": 0.25,
         "iou_threshold": 0.45,
         "providers": [
             "CUDAExecutionProvider",
@@ -49,6 +49,12 @@
         "required_stop_time": 1.0,
         "flow_threshold": 0.6,
         "flow_skip": 3
+    },
+    "tracker": {
+        "first_track_thresh": 0.1,
+        "second_track_thresh": 0.1,
+        "match_thresh": 0.7,
+        "track_buffer": 30
     },
     "__meta__": "Configuration profile loaded from config.json instead of .env. Modify values to change defaults."
 }
