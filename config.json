@@ -17,7 +17,8 @@
         "recording_enabled": true,
         "recording_cleanup_enabled": true,
         "max_recordings_size_mb": 2000.0,
-        "overlay_hud_on_frame": true
+        "overlay_hud_on_frame": true,
+        "save_telemetry_csv": true
     },
     "audio_matching": {
         "audio_matching_enabled": true,
@@ -31,7 +32,7 @@
     "model": {
         "model_path": "/app/workspace/MODEL/v2-yolov8n-det-480-20260501-datav1.onnx",
         "image_size": [480, 480],
-        "conf_threshold": 0.55,
+        "conf_threshold": 0.40,
         "iou_threshold": 0.45,
         "providers": [
             "CUDAExecutionProvider",

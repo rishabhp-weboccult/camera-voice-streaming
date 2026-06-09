@@ -160,43 +160,6 @@ class YOLOv8Detector:
             
         return classes
 
-    def _preprocess(self, image: Image.Image) -> Tuple[np.ndarray, float, Tuple[int, int]]:
-        """
-        Applies aspect-ratio letterboxing, normalization, transposition, 
-        and batch expansion to prepare PIL Image for ONNX model.
-        
-        Returns:
-            input_tensor: numpy array of shape (1, 3, height, width).
-            ratio: Scale ratio applied to match input resolution.
-            padding: Padding offset (pad_left, pad_top) applied.
-        """
-        original_width, original_height = image.size
-        
-        # Calculate aspect ratio scaling factor
-        r = min(self.input_width / original_width, self.input_height / original_height)
-        
-        new_width = int(round(original_width * r))
-        new_height = int(round(original_height * r))
-        
-        # Resize with PIL Bilinear filtering
-        resized_image = image.resize((new_width, new_height), Image.Resampling.BILINEAR)
-        
-        # Embed resized image onto padding canvas
-        padded_image = Image.new("RGB", (self.input_width, self.input_height), (114, 114, 114))
-        pad_left = (self.input_width - new_width) // 2
-        pad_top = (self.input_height - new_height) // 2
-        padded_image.paste(resized_image, (pad_left, pad_top))
-        
-        # Convert image to numpy array, scale values to [0, 1]
-        img_arr = np.array(padded_image, dtype=np.float32) / 255.0
-        
-        # Transpose from HWC to CHW format
-        img_arr = img_arr.transpose(2, 0, 1)
-        
-        # Add batch dimension: [1, 3, H, W]
-        input_tensor = np.expand_dims(img_arr, axis=0)
-        
-        return input_tensor, r, (pad_left, pad_top)
 
     def _preprocess_numpy(self, img: np.ndarray) -> Tuple[np.ndarray, float, Tuple[int, int]]:
         """
@@ -222,15 +185,21 @@ class YOLOv8Detector:
         
         # Optimization: scale the smaller resized image first to perform fewer operations
         # Optimization: if no padding is required, skip allocation and copy steps entirely
-        if (new_w, new_h) == (self.input_width, self.input_height):
-            canvas = resized.astype(np.float32) * (1.0 / 255.0)
-        else:
-            resized_float = resized.astype(np.float32) * (1.0 / 255.0)
-            canvas = np.full((self.input_height, self.input_width, 3), 0.44705882, dtype=np.float32)
-            canvas[pad_top:pad_top + new_h, pad_left:pad_left + new_w] = resized_float
+        # if (new_w, new_h) == (self.input_width, self.input_height):
+        #     canvas = resized.astype(np.float32) * (1.0 / 255.0)
+        # else:
+        #     resized_float = resized.astype(np.float32) * (1.0 / 255.0)
+        #     canvas = np.full((self.input_height, self.input_width, 3), 0.44705882, dtype=np.float32)
+        #     canvas[pad_top:pad_top + new_h, pad_left:pad_left + new_w] = resized_float
         
-        # Transpose from HWC to CHW format: [3, H, W]
-        img_arr = canvas.transpose(2, 0, 1)
+        canvas = np.full((self.input_height, self.input_width, 3), 144, dtype=np.uint8)
+        canvas[pad_top:pad_top + new_h, pad_left:pad_left + new_w] = resized
+        
+        # Convert to float32 and normalize
+        img_arr = canvas.astype(np.float32) / 255.0
+        
+        # Transpose the float array, NOT the original canvas
+        img_arr = img_arr.transpose(2, 0, 1) 
         
         # Add batch dimension: [1, 3, H, W]
         input_tensor = np.expand_dims(img_arr, axis=0)
@@ -381,22 +350,21 @@ class YOLOv8Detector:
             detections: List of Detection instances.
         """
         t_prep_start = time.perf_counter()
-        if isinstance(image_input, np.ndarray):
-            # Fast-path for NumPy arrays (OpenCV frames)
-            original_size = (image_input.shape[1], image_input.shape[0])
-            input_tensor, ratio, padding = self._preprocess_numpy(image_input)
+        if isinstance(image_input, str):
+            if not os.path.exists(image_input):
+                raise FileNotFoundError(f"Input image file not found: {image_input}")
+            image = Image.open(image_input).convert("RGB")
+            img_np = np.array(image)
+        elif isinstance(image_input, Image.Image):
+            image = image_input.convert("RGB")
+            img_np = np.array(image)
+        elif isinstance(image_input, np.ndarray):
+            img_np = image_input
         else:
-            # Fallback for PIL Image or file path
-            if isinstance(image_input, str):
-                if not os.path.exists(image_input):
-                    raise FileNotFoundError(f"Input image file not found: {image_input}")
-                image = Image.open(image_input).convert("RGB")
-            elif isinstance(image_input, Image.Image):
-                image = image_input.convert("RGB")
-            else:
-                raise TypeError("Unsupported image input type. Use file path (str), PIL Image, or NumPy array.")
-            original_size = image.size
-            input_tensor, ratio, padding = self._preprocess(image)
+            raise TypeError("Unsupported image input type. Use file path (str), PIL Image, or NumPy array.")
+        
+        original_size = (img_np.shape[1], img_np.shape[0])
+        input_tensor, ratio, padding = self._preprocess_numpy(img_np)
         t_prep_end = time.perf_counter()
             
         # Inference execution
@@ -431,117 +399,5 @@ class YOLOv8Detector:
         
         return detections
 
-    def _draw_detections_cv2(
-        self, 
-        frame: np.ndarray, 
-        detections: List[Detection], 
-        fps: float = None,
-        logic_status: dict = None,
-        timestamp: float = None,
-        is_stationary: bool = None,
-        required_stop_time: float = 1.0,
-        flow_mag: float = 0.0,
-        roi_x1: int = None,
-        roi_y: int = None,
-        roi_x2: int = None,
-        height: int = None,
-        y_offset: int = 0,
-        detection_fps: float = None,
-        flow_time: float = None,
-        match_time: float = None
-    ) -> np.ndarray:
-        """Draws bounding boxes, labels, and safety logic status dashboard onto a BGR frame."""
-        import cv2
-        
-        # 1. Draw detection bounding boxes
-        for det in detections:
-            x1, y1, x2, y2 = map(int, det.box)
-            # Emerald green in BGR: (113, 204, 46)
-            color = (113, 204, 46)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            
-            label = f"{det.class_name} {det.confidence:.2%}"
-            (text_w, text_h), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-            
-            # Ensure label fits inside frame
-            text_y = max(y1, text_h + 10)
-            cv2.rectangle(frame, (x1, text_y - text_h - 4), (x1 + text_w, text_y + baseline), color, cv2.FILLED)
-            cv2.putText(frame, label, (x1, text_y - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
-            
-        # 2. Draw Safety HUD Dashboard
-        # Draw background panel
-        cv2.rectangle(frame, (10, 10 + y_offset), (380, 205 + y_offset), (20, 20, 20), cv2.FILLED)
-        cv2.rectangle(frame, (10, 10 + y_offset), (380, 205 + y_offset), (100, 100, 100), 1)
-        
-        cv2.putText(frame, "SAFETY COMPLIANCE HUD", (20, 30 + y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
-        cv2.line(frame, (20, 35 + y_offset), (370, 35 + y_offset), (100, 100, 100), 1)
-        
-        # Row 1: FPS and Video Time
-        fps_text = f"Full FPS: {fps:.1f}" if fps is not None else "Full FPS: N/A"
-        det_fps_text = f"Det FPS: {detection_fps:.1f}" if detection_fps is not None else "Det FPS: N/A"
-        time_text = f"Time: {timestamp:.2f}s" if timestamp is not None else "Time: N/A"
-        cv2.putText(frame, fps_text, (20, 55 + y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
-        cv2.putText(frame, det_fps_text, (135, 55 + y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
-        cv2.putText(frame, time_text, (250, 55 + y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
-        
-        # Row 2: Vehicle Motion State and Flow Magnitude
-        if is_stationary is not None:
-            motion_state = "STATIONARY" if is_stationary else "MOVING"
-            motion_color = (0, 255, 0) if is_stationary else (0, 255, 255) # Green if stationary, Yellow if moving
-            cv2.putText(frame, "Vehicle Status: ", (20, 80 + y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
-            cv2.putText(frame, f"{motion_state} (Flow: {flow_mag:.3f})", (150, 80 + y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, motion_color, 1, cv2.LINE_AA)
-            
-        # Row 3: Stop Sign Safety logic status
-        if logic_status is not None:
-            if logic_status["alert_fired"]:
-                status_text = "VIOLATION: RUN STOP SIGN!"
-                status_color = (0, 0, 255) # Red
-            elif logic_status["vehicle_stopped"]:
-                status_text = "COMPLIED: VEHICLE STOPPED"
-                status_color = (0, 255, 0) # Green
-            elif logic_status["stop_seen"]:
-                duration = logic_status["stop_duration"]
-                status_text = f"VISIBLE: {duration:.1f}s / {required_stop_time:.1f}s"
-                status_color = (0, 255, 255) # Yellow
-            else:
-                status_text = "CLEAR: NO STOP SIGN"
-                status_color = (150, 150, 150) # Grey
-                
-            cv2.putText(frame, "Stop Sign: ", (20, 105 + y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
-            cv2.putText(frame, status_text, (110, 105 + y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, status_color, 1, cv2.LINE_AA)
-            
-        # Row 4: Inference Delegate/Provider
-        provider_name = self.session.get_providers()[0]
-        if "CUDA" in provider_name:
-            display_provider = "CUDA (GPU)"
-            provider_color = (113, 204, 46) # Emerald green
-        elif "CPU" in provider_name:
-            display_provider = "CPU"
-            provider_color = (255, 180, 50) # Orange/yellow
-        else:
-            display_provider = provider_name
-            provider_color = (200, 200, 200) # Grey
-            
-        cv2.putText(frame, "Delegate: ", (20, 130 + y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
-        cv2.putText(frame, display_provider, (95, 130 + y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, provider_color, 1, cv2.LINE_AA)
-
-        # Row 5: Prep/Inf/Post average times (in milliseconds)
-        avg_prep_ms = self.avg_preprocess_time * 1000
-        avg_inf_ms = self.avg_inference_time * 1000
-        avg_post_ms = self.avg_postprocess_time * 1000
-        latency_text = f"Prep: {avg_prep_ms:.1f}ms | Inf: {avg_inf_ms:.1f}ms | Post: {avg_post_ms:.1f}ms"
-        cv2.putText(frame, latency_text, (20, 155 + y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 180, 180), 1, cv2.LINE_AA)
-
-        # Row 6: Flow and Audio Match times (in milliseconds)
-        flow_str = f"Flow: {flow_time * 1000:.1f}ms" if flow_time is not None else "Flow: N/A"
-        match_str = f"Match: {match_time * 1000:.1f}ms" if match_time is not None else "Match: N/A"
-        latency_text_2 = f"{flow_str} | {match_str}"
-        cv2.putText(frame, latency_text_2, (20, 175 + y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 180, 180), 1, cv2.LINE_AA)
-
-        # 3. Draw Optical Flow ROI boundary (thin blue rectangle)
-        if roi_x1 is not None and roi_y is not None and roi_x2 is not None and height is not None:
-            cv2.rectangle(frame, (roi_x1, roi_y), (roi_x2, height), (255, 0, 0), 1)
-            
-        return frame
 
 

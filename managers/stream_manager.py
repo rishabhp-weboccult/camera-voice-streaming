@@ -54,6 +54,9 @@ class StreamManager:
         self.record_interval = int(rec_cfg.get("record_interval", 10))
         self.recordings_dir = rec_cfg.get("recordings_dir", "./recordings")
         self.recording_enabled = rec_cfg.get("recording_enabled", True)
+        self.save_telemetry_csv = rec_cfg.get("save_telemetry_csv", False)
+        self.csv_file = None
+        self.csv_writer = None
         
         self.matching_enabled = match_cfg.get("audio_matching_enabled", True)
         self.matching_threshold = float(match_cfg.get("audio_matching_threshold", 0.50))
@@ -222,6 +225,7 @@ class StreamManager:
                 self.hud_recorder = None
 
             os.makedirs(self.screenshots_dir, exist_ok=True)
+            self._init_telemetry_csv()
             return True
 
         # --- Standard Hardware Capture Mode ---
@@ -305,7 +309,31 @@ class StreamManager:
                 self.hud_recorder = None
 
         os.makedirs(self.screenshots_dir, exist_ok=True)
+        self._init_telemetry_csv()
         return True
+
+    def _init_telemetry_csv(self):
+        """Initializes and opens the telemetry CSV file if enabled."""
+        if self.save_telemetry_csv:
+            import csv
+            os.makedirs(self.recordings_dir, exist_ok=True)
+            csv_path = os.path.join(self.recordings_dir, "telemetry.csv")
+            file_exists = os.path.exists(csv_path)
+            try:
+                self.csv_file = open(csv_path, mode='a', newline='', encoding='utf-8')
+                self.csv_writer = csv.writer(self.csv_file)
+                if not file_exists or os.path.getsize(csv_path) == 0:
+                    self.csv_writer.writerow([
+                        "System_Time", "Video_Time_Sec", "Full_FPS", "Detection_FPS",
+                        "Vehicle_Status", "Flow_Magnitude", "Stop_Sign_Status", "Stop_Sign_Duration",
+                        "Detections_Count", "Detections_Detail", "Audio_Match_Score",
+                        "Prep_Latency_ms", "Inference_Latency_ms", "Postprocess_Latency_ms",
+                        "Flow_Latency_ms", "Audio_Match_Latency_ms", "Inference_Provider"
+                    ])
+                    self.csv_file.flush()
+                print(f"[Telemetry] Logging HUD telemetry data to: {csv_path}")
+            except Exception as e:
+                print(f"[Telemetry] ERROR: Failed to open telemetry CSV: {e}", file=sys.stderr)
 
     def _draw_all_hud_overlays(
         self,
@@ -333,7 +361,9 @@ class StreamManager:
 
         # 1. Run YOLO detections overlay (Safety HUD, boxes)
         if self.detection_enabled and self.detector:
-            frame = self.detector._draw_detections_cv2(
+            from utils import _draw_detections_cv2
+            frame = _draw_detections_cv2(
+                detector=self.detector,
                 frame=frame,
                 detections=detections,
                 fps=fps_val,
@@ -414,6 +444,64 @@ class StreamManager:
         if show_controls:
             cv2.rectangle(frame, (0, h - 30), (w, h), (30, 30, 30), -1)
             cv2.putText(frame, "[q]: Quit cleanly  |  [s]: Take Screenshot", (15, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+
+        # Write telemetry data to CSV if enabled
+        if self.save_telemetry_csv and self.csv_writer:
+            try:
+                system_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                
+                # Format detections detail
+                det_details = []
+                for det in detections:
+                    det_details.append(f"{det.class_name}({det.confidence:.2%})")
+                det_details_str = "; ".join(det_details)
+                
+                # Stop sign details
+                status_text = "CLEAR"
+                stop_duration = 0.0
+                if logic_status:
+                    if logic_status["alert_fired"]:
+                        status_text = "VIOLATION"
+                    elif logic_status["vehicle_stopped"]:
+                        status_text = "COMPLIED"
+                    elif logic_status["stop_seen"]:
+                        status_text = "VISIBLE"
+                        stop_duration = logic_status["stop_duration"]
+                
+                # Latency details
+                prep_ms = self.detector.avg_preprocess_time * 1000 if self.detector else 0.0
+                inf_ms = self.detector.avg_inference_time * 1000 if self.detector else 0.0
+                post_ms = self.detector.avg_postprocess_time * 1000 if self.detector else 0.0
+                flow_ms = self.avg_flow_time * 1000
+                match_ms = self.audio_matcher.avg_match_time * 1000 if (self.audio_matcher and self.matching_enabled) else 0.0
+                
+                provider = self.detector.session.get_providers()[0] if self.detector else "N/A"
+                motion_state = "STATIONARY" if is_stationary else "MOVING" if is_stationary is not None else "N/A"
+                
+                self.csv_writer.writerow([
+                    system_time,
+                    f"{timestamp:.3f}" if timestamp is not None else "0.000",
+                    f"{fps_val:.1f}",
+                    f"{detection_fps:.1f}" if detection_fps is not None else "0.0",
+                    motion_state,
+                    f"{flow_mag:.6f}",
+                    status_text,
+                    f"{stop_duration:.3f}",
+                    len(detections),
+                    det_details_str,
+                    f"{current_score:.4f}",
+                    f"{prep_ms:.2f}",
+                    f"{inf_ms:.2f}",
+                    f"{post_ms:.2f}",
+                    f"{flow_ms:.2f}",
+                    f"{match_ms:.2f}",
+                    provider
+                ])
+                # Periodically flush
+                if self.full_frame_count % 15 == 0:
+                    self.csv_file.flush()
+            except Exception:
+                pass
             
         return frame
 
@@ -466,6 +554,7 @@ class StreamManager:
         
         try:
             while True:
+                start_time = time.time()
                 img_src = self.video_stream.read()
                 if img_src is None:
                     time.sleep(0.01)
@@ -525,8 +614,8 @@ class StreamManager:
                 
                 if self.detection_enabled and self.stop_sign_logic:
                     if self.vehicle_stationary_logic_enabled:
-                        if frame_idx_det % flow_skip == 0 or frame_idx_det == 1:
-                            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                        if frame_idx % flow_skip == 0 or frame_idx == 1:
+                            gray = cv2.cvtColor(img_src, cv2.COLOR_BGR2GRAY)
                             if prev_gray is not None:
                                 h_small, w_small = prev_gray[roi_y:, roi_x1:roi_x2].shape[:2]
                                 prev_small = cv2.resize(prev_gray[roi_y:, roi_x1:roi_x2], (w_small // 4, h_small // 4))
@@ -612,7 +701,10 @@ class StreamManager:
                     break
                 
                 # --- 7. Poll keyboard inputs ---
-                key = cv2.waitKey(1) & 0xFF
+                delay = 1.0 / self.fps
+                elapsed = time.time() - start_time
+                delay_ms = max(1, int((delay - elapsed) * 1000))
+                key = cv2.waitKey(delay_ms) & 0xFF
                 if key == ord('q'):
                     break
                 elif key == ord('s'):
@@ -716,8 +808,8 @@ class StreamManager:
                 
                 if self.detection_enabled and self.stop_sign_logic:
                     if self.vehicle_stationary_logic_enabled:
-                        if frame_idx_det % flow_skip == 0 or frame_idx_det == 1:
-                            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                        if frame_idx % flow_skip == 0 or frame_idx == 1:
+                            gray = cv2.cvtColor(img_src, cv2.COLOR_BGR2GRAY)
                             if prev_gray is not None:
                                 h_small, w_small = prev_gray[roi_y:, roi_x1:roi_x2].shape[:2]
                                 prev_small = cv2.resize(prev_gray[roi_y:, roi_x1:roi_x2], (w_small // 4, h_small // 4))
@@ -841,6 +933,16 @@ class StreamManager:
             cv2.destroyAllWindows()
         except Exception:
             pass
+
+        if self.csv_file:
+            try:
+                self.csv_file.close()
+                print("[Telemetry] Telemetry CSV file closed.")
+            except Exception:
+                pass
+            self.csv_file = None
+            self.csv_writer = None
+
         print("[Shutdown] Session closed cleanly.")
 
     def _detection_worker(self):
