@@ -16,7 +16,7 @@
         "recordings_dir": "/app/workspace/recordings",
         "recording_enabled": true,
         "recording_cleanup_enabled": true,
-        "max_recordings_size_mb": 3000.0,
+        "max_recordings_size_mb": 2000.0,
         "overlay_hud_on_frame": true
     },
     "audio_matching": {
@@ -31,7 +31,7 @@
     "model": {
         "model_path": "/app/workspace/MODEL/v2-yolov8n-det-480-20260501-datav1.onnx",
         "image_size": [480, 480],
-        "conf_threshold": 0.25,
+        "conf_threshold": 0.55,
         "iou_threshold": 0.45,
         "providers": [
             "CUDAExecutionProvider",
@@ -46,7 +46,7 @@
         "vehicle_stationary_logic_enabled": true,
         "stop_class_name": "stop",
         "required_stop_time": 1.0,
-        "flow_threshold": 0.5,
+        "flow_threshold": 0.6,
         "flow_skip": 3
     },
     "__meta__": "Configuration profile loaded from config.json instead of .env. Modify values to change defaults."

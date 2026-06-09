@@ -46,7 +46,7 @@
         "vehicle_stationary_logic_enabled": true,
         "stop_class_name": "stop",
         "required_stop_time": 1.0,
-        "flow_threshold": 0.5,
+        "flow_threshold": 0.6,
         "flow_skip": 3
     },
     "__meta__": "Configuration profile loaded from config.json instead of .env. Modify values to change defaults."

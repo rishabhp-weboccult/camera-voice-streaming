@@ -2,6 +2,8 @@
 import os
 import sys
 import time
+import queue
+import threading
 from datetime import datetime
 
 try:
@@ -88,6 +90,25 @@ class StreamManager:
         self.full_frame_count = 0
         self.last_full_fps_time = time.time()
         
+        # Additional profiling metrics
+        self._flow_latencies = []
+        self._match_latencies = []
+        self.avg_flow_time = 0.0
+        self.avg_match_time = 0.0
+
+        # Threading & Queue structures for pipelined processing
+        self.stopped = False
+        self.det_in_queue = queue.Queue(maxsize=4)
+        self.det_out_queue = queue.Queue(maxsize=4)
+        self.flow_queue = queue.Queue(maxsize=1)
+        
+        self.latest_is_stationary = True
+        self.latest_flow_mag = 0.0
+        self.flow_lock = threading.Lock()
+        
+        self.det_thread = None
+        self.flow_thread = None
+        
     def start_session(self):
         """Prepares resources, clears hardware locks or starts video file demuxers."""
         # Initialize Object Detection and Stop Sign Logic if enabled
@@ -105,6 +126,15 @@ class StreamManager:
                     stop_class_name=stop_class_name,
                     required_stop_time=required_stop_time
                 )
+                
+                # Start worker threads
+                self.stopped = False
+                self.det_thread = threading.Thread(target=self._detection_worker, name="DetectionWorkerThread", daemon=True)
+                self.det_thread.start()
+                
+                if self.vehicle_stationary_logic_enabled:
+                    self.flow_thread = threading.Thread(target=self._optical_flow_worker, name="OpticalFlowWorkerThread", daemon=True)
+                    self.flow_thread.start()
             except Exception as e:
                 print(f"[Detection] ERROR starting YOLOv8 Detector: {e}", file=sys.stderr)
                 self.detection_enabled = False
@@ -317,7 +347,9 @@ class StreamManager:
                 roi_x2=roi_x2,
                 height=h,
                 y_offset=60,
-                detection_fps=detection_fps
+                detection_fps=detection_fps,
+                flow_time=self.avg_flow_time,
+                match_time=self.audio_matcher.avg_match_time if (self.audio_matcher and self.matching_enabled) else None
             )
 
         # 2. Draw Semi-transparent Header Overlay
@@ -434,19 +466,49 @@ class StreamManager:
         
         try:
             while True:
-                frame = self.video_stream.read()
-                if frame is None:
+                img_src = self.video_stream.read()
+                if img_src is None:
                     time.sleep(0.01)
                     continue
-                    
+                
+                frame_idx += 1
+                
+                if self.run_on_video:
+                    timestamp = frame_idx / self.fps
+                else:
+                    timestamp = time.time() - loop_start_time
+                
+                # Push frame to background detection queue (non-blocking)
+                if self.detection_enabled:
+                    if not self.det_in_queue.full():
+                        try:
+                            self.det_in_queue.put_nowait((img_src.copy(), timestamp, frame_idx))
+                        except queue.Full:
+                            pass
+                
+                # Retrieve the matched frame and its corresponding detections from the pipeline
+                if self.detection_enabled:
+                    try:
+                        # Blocking read with timeout to keep UI responsive
+                        frame, timestamp_det, frame_idx_det, detections = self.det_out_queue.get(timeout=0.1)
+                    except queue.Empty:
+                        # Fallback if queue is empty: reuse source frame with empty detections
+                        frame = img_src.copy()
+                        timestamp_det = timestamp
+                        frame_idx_det = frame_idx
+                        detections = []
+                else:
+                    frame = img_src.copy()
+                    timestamp_det = timestamp
+                    frame_idx_det = frame_idx
+                    detections = []
+                
                 h, w, _ = frame.shape
                 if not roi_calculated:
                     roi_y = int(h * 0.6)
                     roi_x1 = int(w * 0.2)
                     roi_x2 = int(w * 0.8)
                     roi_calculated = True
-
-                frame_idx += 1
 
                 # Update full loop FPS
                 self.full_frame_count += 1
@@ -456,73 +518,54 @@ class StreamManager:
                     if elapsed_full > 0:
                         self.current_full_fps = 15.0 / elapsed_full
                     self.last_full_fps_time = now_time
-                
-                if self.run_on_video:
-                    timestamp = frame_idx / self.fps
-                else:
-                    timestamp = time.time() - loop_start_time
 
-                # --- 1a. Run Object Detection and Stop Sign compliance logic ---
-                detections = []
+                # --- 1a. Run Stop Sign compliance logic and optical flow ---
                 logic_status = None
                 is_stationary = True
                 
-                if self.detection_enabled and self.detector and self.stop_sign_logic:
-                    # Convert to RGB for detector
-                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    
-                    t_det_start = time.time()
-                    detections = self.detector.predict(rgb_frame)
-                    t_det_end = time.time()
-                    
-                    det_elapsed = t_det_end - t_det_start
-                    if not hasattr(self, "_det_latencies"):
-                        self._det_latencies = []
-                    self._det_latencies.append(det_elapsed)
-                    if len(self._det_latencies) > 15:
-                        self._det_latencies.pop(0)
-                    avg_det_latency = sum(self._det_latencies) / len(self._det_latencies)
-                    self.current_det_fps = 1.0 / avg_det_latency if avg_det_latency > 0 else 0.0
-                    
+                if self.detection_enabled and self.stop_sign_logic:
                     if self.vehicle_stationary_logic_enabled:
-                        if frame_idx % flow_skip == 0 or frame_idx == 1:
+                        if frame_idx_det % flow_skip == 0 or frame_idx_det == 1:
                             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                             if prev_gray is not None:
                                 h_small, w_small = prev_gray[roi_y:, roi_x1:roi_x2].shape[:2]
                                 prev_small = cv2.resize(prev_gray[roi_y:, roi_x1:roi_x2], (w_small // 4, h_small // 4))
                                 gray_small = cv2.resize(gray[roi_y:, roi_x1:roi_x2], (w_small // 4, h_small // 4))
                                 
-                                flow = cv2.calcOpticalFlowFarneback(
-                                    prev_small, gray_small,
-                                    None, 0.5, 2, 8, 2, 5, 1.0, 0
-                                )
-                                mag, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
-                                flow_mag = float(np.mean(mag))
+                                # Push frames to optical flow queue (non-blocking)
+                                if self.flow_queue.empty():
+                                    try:
+                                        self.flow_queue.put_nowait((prev_small.copy(), gray_small.copy(), flow_threshold))
+                                    except queue.Full:
+                                        pass
                             prev_gray = gray
                         
-                        is_stationary = flow_mag < flow_threshold
+                        # Get latest stationary state
+                        with self.flow_lock:
+                            is_stationary = self.latest_is_stationary
+                            flow_mag = self.latest_flow_mag
                     else:
                         is_stationary = True
                     
-                    logic_status = self.stop_sign_logic.update(timestamp, detections, is_stationary)
+                    logic_status = self.stop_sign_logic.update(timestamp_det, detections, is_stationary)
 
                     # Log on changes or alerts
                     if logic_status:
                         if logic_status["alert_fired"] and not getattr(self, "_last_alert", False):
-                            print(f"\n>>> [VIOLATION ALERT] Stop Sign violation alert fired at time {timestamp:.2f}s! <<<")
+                            print(f"\n>>> [VIOLATION ALERT] Stop Sign violation alert fired at time {timestamp_det:.2f}s! <<<")
                             self._last_alert = True
                         if not logic_status["alert_fired"]:
                             self._last_alert = False
                             
                         if logic_status["vehicle_stopped"] and not getattr(self, "_last_stopped", False):
-                            print(f"\n>>> [COMPLIANCE VERIFIED] Vehicle successfully stopped at sign (time: {timestamp:.2f}s) <<<")
+                            print(f"\n>>> [COMPLIANCE VERIFIED] Vehicle successfully stopped at sign (time: {timestamp_det:.2f}s) <<<")
                             self._last_stopped = True
                         if not logic_status["vehicle_stopped"]:
                             self._last_stopped = False
 
                 # --- 1. Compute Audio Matching in real time (every 3 frames to save CPU) ---
                 if self.matching_enabled and self.audio_receiver and self.audio_matcher and self.audio_matcher.target_loaded:
-                    if frame_idx % 3 == 0:
+                    if frame_idx_det % 3 == 0:
                         query_sec = self.audio_matcher.target_duration + 1.0
                         live_audio_window = self.audio_receiver.get_audio_window(query_sec)
                         current_score, is_matched = self.audio_matcher.match_live_audio(live_audio_window)
@@ -532,14 +575,14 @@ class StreamManager:
                             print(f"\r[MATCH DETECTED] Correlation: {current_score:.2f} at {datetime.now().strftime('%H:%M:%S')}")
                 
                 # Keep a copy of the clean frame for recording before drawing overlays on it
-                raw_frame = frame.copy() if not self.overlay_hud_on_frame else None
+                raw_frame = frame if not self.overlay_hud_on_frame else None
 
                 # --- 2. Draw HUD/overlays on frame for live window display ---
                 frame = self._draw_all_hud_overlays(
                     frame=frame,
                     detections=detections,
                     logic_status=logic_status,
-                    timestamp=timestamp,
+                    timestamp=timestamp_det,
                     is_stationary=is_stationary,
                     flow_mag=flow_mag,
                     current_score=current_score,
@@ -595,7 +638,8 @@ class StreamManager:
         current_score = 0.0
         is_matched = False
         last_match_time = 0.0
-        frame = first_frame
+        img_src = first_frame
+        frame = img_src.copy()
         
         delay = 1.0 / self.fps
         last_log_time = 0.0
@@ -623,9 +667,39 @@ class StreamManager:
                 # Fetch latest frame from the video stream
                 new_frame = self.video_stream.read()
                 if new_frame is not None:
-                    frame = new_frame
+                    img_src = new_frame
                 
                 frame_idx += 1
+                
+                if self.run_on_video:
+                    timestamp = frame_idx / self.fps
+                else:
+                    timestamp = time.time() - loop_start_time
+                
+                # Push frame to background detection queue (non-blocking)
+                if self.detection_enabled:
+                    if not self.det_in_queue.full():
+                        try:
+                            self.det_in_queue.put_nowait((img_src.copy(), timestamp, frame_idx))
+                        except queue.Full:
+                            pass
+                
+                # Retrieve the matched frame and its corresponding detections from the pipeline
+                if self.detection_enabled:
+                    try:
+                        # Blocking read with timeout to keep UI responsive
+                        frame, timestamp_det, frame_idx_det, detections = self.det_out_queue.get(timeout=0.1)
+                    except queue.Empty:
+                        # Fallback if queue is empty: reuse source frame with empty detections
+                        frame = img_src.copy()
+                        timestamp_det = timestamp
+                        frame_idx_det = frame_idx
+                        detections = []
+                else:
+                    frame = img_src.copy()
+                    timestamp_det = timestamp
+                    frame_idx_det = frame_idx
+                    detections = []
 
                 # Update full loop FPS
                 self.full_frame_count += 1
@@ -636,72 +710,53 @@ class StreamManager:
                         self.current_full_fps = 15.0 / elapsed_full
                     self.last_full_fps_time = now_time
 
-                if self.run_on_video:
-                    timestamp = frame_idx / self.fps
-                else:
-                    timestamp = time.time() - loop_start_time
-
-                # --- 1a. Run Object Detection and Stop Sign compliance logic ---
-                detections = []
+                # --- 1a. Run Stop Sign compliance logic and optical flow ---
                 logic_status = None
                 is_stationary = True
                 
-                if self.detection_enabled and self.detector and self.stop_sign_logic:
-                    # Convert to RGB for detector
-                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    
-                    t_det_start = time.time()
-                    detections = self.detector.predict(rgb_frame)
-                    t_det_end = time.time()
-                    
-                    det_elapsed = t_det_end - t_det_start
-                    if not hasattr(self, "_det_latencies"):
-                        self._det_latencies = []
-                    self._det_latencies.append(det_elapsed)
-                    if len(self._det_latencies) > 15:
-                        self._det_latencies.pop(0)
-                    avg_det_latency = sum(self._det_latencies) / len(self._det_latencies)
-                    self.current_det_fps = 1.0 / avg_det_latency if avg_det_latency > 0 else 0.0
-                    
+                if self.detection_enabled and self.stop_sign_logic:
                     if self.vehicle_stationary_logic_enabled:
-                        if frame_idx % flow_skip == 0 or frame_idx == 1:
+                        if frame_idx_det % flow_skip == 0 or frame_idx_det == 1:
                             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                             if prev_gray is not None:
                                 h_small, w_small = prev_gray[roi_y:, roi_x1:roi_x2].shape[:2]
                                 prev_small = cv2.resize(prev_gray[roi_y:, roi_x1:roi_x2], (w_small // 4, h_small // 4))
                                 gray_small = cv2.resize(gray[roi_y:, roi_x1:roi_x2], (w_small // 4, h_small // 4))
                                 
-                                flow = cv2.calcOpticalFlowFarneback(
-                                    prev_small, gray_small,
-                                    None, 0.5, 2, 8, 2, 5, 1.0, 0
-                                )
-                                mag, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
-                                flow_mag = float(np.mean(mag))
+                                # Push frames to optical flow queue (non-blocking)
+                                if self.flow_queue.empty():
+                                    try:
+                                        self.flow_queue.put_nowait((prev_small.copy(), gray_small.copy(), flow_threshold))
+                                    except queue.Full:
+                                        pass
                             prev_gray = gray
                         
-                        is_stationary = flow_mag < flow_threshold
+                        # Get latest stationary state
+                        with self.flow_lock:
+                            is_stationary = self.latest_is_stationary
+                            flow_mag = self.latest_flow_mag
                     else:
                         is_stationary = True
                     
-                    logic_status = self.stop_sign_logic.update(timestamp, detections, is_stationary)
+                    logic_status = self.stop_sign_logic.update(timestamp_det, detections, is_stationary)
 
                     # Log on changes or alerts
                     if logic_status:
                         if logic_status["alert_fired"] and not getattr(self, "_last_alert", False):
-                            print(f"\n>>> [VIOLATION ALERT] Stop Sign violation alert fired at time {timestamp:.2f}s! <<<")
+                            print(f"\n>>> [VIOLATION ALERT] Stop Sign violation alert fired at time {timestamp_det:.2f}s! <<<")
                             self._last_alert = True
                         if not logic_status["alert_fired"]:
                             self._last_alert = False
                             
                         if logic_status["vehicle_stopped"] and not getattr(self, "_last_stopped", False):
-                            print(f"\n>>> [COMPLIANCE VERIFIED] Vehicle successfully stopped at sign (time: {timestamp:.2f}s) <<<")
+                            print(f"\n>>> [COMPLIANCE VERIFIED] Vehicle successfully stopped at sign (time: {timestamp_det:.2f}s) <<<")
                             self._last_stopped = True
                         if not logic_status["vehicle_stopped"]:
                             self._last_stopped = False
 
                 if self.matching_enabled and self.audio_receiver and self.audio_matcher:
                     # Match every 3 frames to save CPU, same as in interactive mode
-                    if frame_idx % 3 == 0:
+                    if frame_idx_det % 3 == 0:
                         query_sec = self.audio_matcher.target_duration + 1.0
                         live_audio_window = self.audio_receiver.get_audio_window(query_sec)
                         current_score, is_matched = self.audio_matcher.match_live_audio(live_audio_window)
@@ -714,7 +769,7 @@ class StreamManager:
                     frame=frame,
                     detections=detections,
                     logic_status=logic_status,
-                    timestamp=timestamp,
+                    timestamp=timestamp_det,
                     is_stationary=is_stationary,
                     flow_mag=flow_mag,
                     current_score=current_score,
@@ -753,6 +808,16 @@ class StreamManager:
     def stop_session(self):
         """Cleanly tears down background processes, monitors, streams, and releases locks."""
         print("[Shutdown] Stopping active managers, objects, and hardware handles...")
+        self.stopped = True
+        
+        # Join worker threads
+        if self.det_thread:
+            self.det_thread.join(timeout=1.0)
+            self.det_thread = None
+        if self.flow_thread:
+            self.flow_thread.join(timeout=1.0)
+            self.flow_thread = None
+            
         if self.audio_receiver:
             self.audio_receiver.stop()
         if self.hud_recorder:
@@ -777,3 +842,74 @@ class StreamManager:
         except Exception:
             pass
         print("[Shutdown] Session closed cleanly.")
+
+    def _detection_worker(self):
+        """Background worker thread for running model inference in a pipeline."""
+        import queue
+        print("[Detection] Background worker thread started.")
+        self._det_latencies = []
+        while not self.stopped:
+            try:
+                # Get the frame package from the input queue
+                item = self.det_in_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+                
+            try:
+                img, ts, idx = item
+                rgb_frame = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                
+                t_det_start = time.perf_counter()
+                detections = self.detector.predict(rgb_frame)
+                t_det_end = time.perf_counter()
+                
+                det_elapsed = t_det_end - t_det_start
+                self._det_latencies.append(det_elapsed)
+                if len(self._det_latencies) > 15:
+                    self._det_latencies.pop(0)
+                avg_det_latency = sum(self._det_latencies) / len(self._det_latencies)
+                self.current_det_fps = 1.0 / avg_det_latency if avg_det_latency > 0 else 0.0
+                
+                # Push the processed frame and its matching detections to the output queue
+                self.det_out_queue.put((img, ts, idx, detections))
+            except Exception as e:
+                print(f"[Detection] Error in worker thread: {e}", file=sys.stderr)
+            finally:
+                self.det_in_queue.task_done()
+        print("[Detection] Background worker thread stopped.")
+
+    def _optical_flow_worker(self):
+        """Background worker thread for calculating optical flow."""
+        import queue
+        print("[OpticalFlow] Background worker thread started.")
+        while not self.stopped:
+            try:
+                prev_small, gray_small, flow_threshold = self.flow_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+                
+            try:
+                t_flow_start = time.perf_counter()
+                flow = cv2.calcOpticalFlowFarneback(
+                    prev_small, gray_small,
+                    None, 0.5, 2, 8, 2, 5, 1.0, 0
+                )
+                mag, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+                flow_mag = float(np.mean(mag))
+                is_stationary = flow_mag < flow_threshold
+                t_flow_end = time.perf_counter()
+                
+                flow_latency = t_flow_end - t_flow_start
+                self._flow_latencies.append(flow_latency)
+                if len(self._flow_latencies) > 15:
+                    self._flow_latencies.pop(0)
+                self.avg_flow_time = sum(self._flow_latencies) / len(self._flow_latencies)
+                
+                with self.flow_lock:
+                    self.latest_is_stationary = is_stationary
+                    self.latest_flow_mag = flow_mag
+            except Exception as e:
+                print(f"[OpticalFlow] Error in worker thread: {e}", file=sys.stderr)
+            finally:
+                self.flow_queue.task_done()
+        print("[OpticalFlow] Background worker thread stopped.")

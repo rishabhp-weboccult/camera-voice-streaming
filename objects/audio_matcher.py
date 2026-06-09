@@ -2,6 +2,7 @@
 import os
 import sys
 import wave
+import time
 import numpy as np
 
 class AudioMatcher:
@@ -30,6 +31,10 @@ class AudioMatcher:
         self.target_rms = 0.0
         self.target_features = None
         self.target_loaded = False
+        
+        # Latency tracking
+        self._latencies = []
+        self.avg_match_time = 0.0
         
         if self.enabled:
             self.load_target_template()
@@ -178,12 +183,19 @@ class AudioMatcher:
         to absorb slight speech rate changes without losing temporal sequence ordering.
         Returns (max_score, is_match).
         """
+        t_start = time.perf_counter()
         if not self.enabled or not self.target_loaded or self.target_features is None:
             return 0.0, False
             
         # 1. Voice Activity Detection (VAD) Energy Gate:
         live_rms = np.sqrt(np.mean(live_audio_window**2))
         if live_rms < 0.0015 or live_rms < 0.03 * self.target_rms:
+            # Update latency even for VAD gate exclusions to keep it accurate
+            t_end = time.perf_counter()
+            self._latencies.append(t_end - t_start)
+            if len(self._latencies) > 15:
+                self._latencies.pop(0)
+            self.avg_match_time = sum(self._latencies) / len(self._latencies)
             return 0.0, False
             
         # 2. Feature Extraction of live sliding window
@@ -193,6 +205,11 @@ class AudioMatcher:
         T_live = live_features.shape[0]
         
         if T_live < T_target:
+            t_end = time.perf_counter()
+            self._latencies.append(t_end - t_start)
+            if len(self._latencies) > 15:
+                self._latencies.pop(0)
+            self.avg_match_time = sum(self._latencies) / len(self._latencies)
             return 0.0, False
             
         # 3. Sliding-window average frame correlation search with local temporal jitter
@@ -223,4 +240,11 @@ class AudioMatcher:
                 
         max_similarity = max(0.0, max_similarity)
         is_match = max_similarity >= self.threshold
+        
+        t_end = time.perf_counter()
+        self._latencies.append(t_end - t_start)
+        if len(self._latencies) > 15:
+            self._latencies.pop(0)
+        self.avg_match_time = sum(self._latencies) / len(self._latencies)
+        
         return max_similarity, is_match

@@ -4,6 +4,7 @@ import os
 import ast
 import time
 import numpy as np
+import cv2
 import onnxruntime as ort
 from PIL import Image
 from typing import List, Dict, Any, Tuple, Union
@@ -102,6 +103,14 @@ class YOLOv8Detector:
         # Load class names mapping
         self.classes = self._load_classes()
 
+        # Latency tracking metrics
+        self._preprocess_latencies = []
+        self._inference_latencies = []
+        self._postprocess_latencies = []
+        self.avg_preprocess_time = 0.0
+        self.avg_inference_time = 0.0
+        self.avg_postprocess_time = 0.0
+
     def _select_providers(self, device: str) -> List[str]:
         """Determines the appropriate execution providers based on user intent and system features."""
         available = ort.get_available_providers()
@@ -194,7 +203,6 @@ class YOLOv8Detector:
         Fast OpenCV-based letterboxing and preprocessing for NumPy arrays.
         Avoids PIL conversion overhead entirely.
         """
-        import cv2
         h, w = img.shape[:2]
         
         # Calculate aspect ratio scaling factor
@@ -212,15 +220,17 @@ class YOLOv8Detector:
         pad_left = (self.input_width - new_w) // 2
         pad_top = (self.input_height - new_h) // 2
         
-        # Create canvas filled with padding color (114, 114, 114)
-        canvas = np.full((self.input_height, self.input_width, 3), 114, dtype=np.uint8)
-        canvas[pad_top:pad_top + new_h, pad_left:pad_left + new_w] = resized
-        
-        # Convert to float32, normalize to [0, 1]
-        img_arr = canvas.astype(np.float32) / 255.0
+        # Optimization: scale the smaller resized image first to perform fewer operations
+        # Optimization: if no padding is required, skip allocation and copy steps entirely
+        if (new_w, new_h) == (self.input_width, self.input_height):
+            canvas = resized.astype(np.float32) * (1.0 / 255.0)
+        else:
+            resized_float = resized.astype(np.float32) * (1.0 / 255.0)
+            canvas = np.full((self.input_height, self.input_width, 3), 0.44705882, dtype=np.float32)
+            canvas[pad_top:pad_top + new_h, pad_left:pad_left + new_w] = resized_float
         
         # Transpose from HWC to CHW format: [3, H, W]
-        img_arr = img_arr.transpose(2, 0, 1)
+        img_arr = canvas.transpose(2, 0, 1)
         
         # Add batch dimension: [1, 3, H, W]
         input_tensor = np.expand_dims(img_arr, axis=0)
@@ -370,6 +380,7 @@ class YOLOv8Detector:
         Returns:
             detections: List of Detection instances.
         """
+        t_prep_start = time.perf_counter()
         if isinstance(image_input, np.ndarray):
             # Fast-path for NumPy arrays (OpenCV frames)
             original_size = (image_input.shape[1], image_input.shape[0])
@@ -386,187 +397,39 @@ class YOLOv8Detector:
                 raise TypeError("Unsupported image input type. Use file path (str), PIL Image, or NumPy array.")
             original_size = image.size
             input_tensor, ratio, padding = self._preprocess(image)
+        t_prep_end = time.perf_counter()
             
         # Inference execution
+        t_inf_start = time.perf_counter()
         outputs = self.session.run(None, {self.input_name: input_tensor})
+        t_inf_end = time.perf_counter()
         
         # Postprocessing: decodes predictions, runs NMS, maps to original size
+        t_post_start = time.perf_counter()
         detections = self._postprocess(outputs[0], original_size, ratio, padding)
+        t_post_end = time.perf_counter()
+        
+        # Record latencies
+        prep_latency = t_prep_end - t_prep_start
+        inf_latency = t_inf_end - t_inf_start
+        post_latency = t_post_end - t_post_start
+        
+        self._preprocess_latencies.append(prep_latency)
+        self._inference_latencies.append(inf_latency)
+        self._postprocess_latencies.append(post_latency)
+        
+        if len(self._preprocess_latencies) > 15:
+            self._preprocess_latencies.pop(0)
+        if len(self._inference_latencies) > 15:
+            self._inference_latencies.pop(0)
+        if len(self._postprocess_latencies) > 15:
+            self._postprocess_latencies.pop(0)
+            
+        self.avg_preprocess_time = sum(self._preprocess_latencies) / len(self._preprocess_latencies)
+        self.avg_inference_time = sum(self._inference_latencies) / len(self._inference_latencies)
+        self.avg_postprocess_time = sum(self._postprocess_latencies) / len(self._postprocess_latencies)
         
         return detections
-
-    def _check_stationary(self, timestamp: float) -> bool:
-        """
-        Determines if the vehicle is stationary at the given timestamp (seconds).
-        Supports static booleans and list of [start, end] intervals.
-        """
-        safety_cfg = self.config.get("safety_logic", {})
-        val = safety_cfg.get("is_stationary", True)
-        if isinstance(val, bool):
-            return val
-        if isinstance(val, list):
-            for interval in val:
-                if isinstance(interval, list) and len(interval) >= 2:
-                    if interval[0] <= timestamp <= interval[1]:
-                        return True
-            return False
-        return True
-
-    def predict_video(self, video_path: str, output_path: str = None) -> List[List[Detection]]:
-        """
-        Runs the detection pipeline on a video file frame-by-frame.
-        
-        Args:
-            video_path: Path to the input video file.
-            output_path: Path to save the visualized output video (optional).
-            
-        Returns:
-            all_detections: A list of lists of Detection objects (one list per frame).
-        """
-        import cv2
-        
-        logger.info(f"Opening input video: {video_path}")
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            raise IOError(f"Cannot open video file: {video_path}")
-            
-        # Get video properties
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        
-        logger.info(f"Video resolution: {width}x{height}, FPS: {fps}, Total frames: {total_frames}")
-        
-        writer = None
-        if output_path:
-            logger.info(f"Saving output video to: {output_path}")
-            # Ensure parent directories exist
-            parent_dir = os.path.dirname(output_path)
-            if parent_dir:
-                os.makedirs(parent_dir, exist_ok=True)
-            # Use mp4v codec for mp4 format
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-            if not writer.isOpened():
-                logger.error(f"Failed to open output video writer for path: {output_path}")
-            
-        # Initialize Stop Sign compliance logic
-        safety_cfg = self.config.get("safety_logic", {})
-        stop_class_name = safety_cfg.get("stop_class_name", "stop")
-        required_stop_time = float(safety_cfg.get("required_stop_time", 1.0))
-        logic = StopSignLogic(stop_class_name, required_stop_time)
-        
-        # Optical Flow states
-        prev_gray = None
-        flow_mag = 0.0
-        flow_skip = int(safety_cfg.get("flow_skip", 3))
-        flow_threshold = float(safety_cfg.get("flow_threshold", 0.5))
-        
-        # Region of Interest for Optical Flow (bottom-center area)
-        roi_y = int(height * 0.6)
-        roi_x1 = int(width * 0.2)
-        roi_x2 = int(width * 0.8)
-        
-        all_detections = []
-        frame_idx = 0
-        
-        last_alert = False
-        last_stopped = False
-        
-        while True:
-            t0 = time.time()
-            ret, frame = cap.read()
-            if not ret:
-                break
-                
-            frame_idx += 1
-            timestamp = frame_idx / fps if fps > 0 else 0.0
-            
-            if frame_idx % 30 == 0 or frame_idx == 1:
-                logger.info(f"Processing frame {frame_idx}/{total_frames} (Time: {timestamp:.2f}s)...")
-                
-            # OpenCV loads frame in BGR, convert to RGB for predictions
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-            # Predict & time the detection stage specifically
-            t_det_start = time.time()
-            detections = self.predict(rgb_frame)
-            t_det_end = time.time()
-            det_elapsed = t_det_end - t_det_start
-            det_fps_val = 1.0 / det_elapsed if det_elapsed > 0 else 0.0
-            
-            all_detections.append(detections)
-            
-            # Calculate Optical Flow on bottom-center ROI
-            if frame_idx % flow_skip == 0 or frame_idx == 1:
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                if prev_gray is not None:
-                    # Downsample and compute optical flow on smaller image to save processing power
-                    h_small, w_small = prev_gray[roi_y:, roi_x1:roi_x2].shape[:2]
-                    prev_small = cv2.resize(prev_gray[roi_y:, roi_x1:roi_x2], (w_small // 2, h_small // 2))
-                    gray_small = cv2.resize(gray[roi_y:, roi_x1:roi_x2], (w_small // 2, h_small // 2))
-                    
-                    flow = cv2.calcOpticalFlowFarneback(
-                        prev_small, gray_small,
-                        None, 0.5, 2, 8, 2, 5, 1.0, 0
-                    )
-                    mag, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
-                    flow_mag = float(np.mean(mag))
-                prev_gray = gray
-            
-            # Determine vehicle stationary status
-            safety_cfg = self.config.get("safety_logic", {})
-            if "is_stationary" in safety_cfg:
-                is_stationary = self._check_stationary(timestamp)
-            else:
-                is_stationary = flow_mag < flow_threshold
-            
-            # Update safety compliance state machine
-            logic_status = logic.update(timestamp, detections, is_stationary)
-            
-            # Log on changes or alerts
-            if logic_status["alert_fired"] and not last_alert:
-                logger.warning(f"Frame {frame_idx} (Time: {timestamp:.2f}s): Stop Sign violation alert fired!")
-                last_alert = True
-            if not logic_status["alert_fired"]:
-                last_alert = False
-                
-            if logic_status["vehicle_stopped"] and not last_stopped:
-                logger.info(f"Frame {frame_idx} (Time: {timestamp:.2f}s): Vehicle compliance verified (stopped at sign).")
-                last_stopped = True
-            if not logic_status["vehicle_stopped"]:
-                last_stopped = False
-            
-            # Calculate processing FPS
-            elapsed = time.time() - t0
-            fps_val = 1.0 / elapsed if elapsed > 0 else 0.0
-            
-            if writer is not None:
-                # Draw detections, HUD metrics and FPS on the BGR frame using OpenCV
-                annotated_frame = self._draw_detections_cv2(
-                    frame, 
-                    detections, 
-                    fps=fps_val,
-                    logic_status=logic_status,
-                    timestamp=timestamp,
-                    is_stationary=is_stationary,
-                    required_stop_time=required_stop_time,
-                    flow_mag=flow_mag,
-                    roi_x1=roi_x1,
-                    roi_y=roi_y,
-                    roi_x2=roi_x2,
-                    height=height,
-                    detection_fps=det_fps_val
-                )
-                writer.write(annotated_frame)
-                
-        cap.release()
-        if writer is not None:
-            writer.release()
-            
-        logger.info("Video processing completed successfully.")
-        return all_detections
 
     def _draw_detections_cv2(
         self, 
@@ -583,7 +446,9 @@ class YOLOv8Detector:
         roi_x2: int = None,
         height: int = None,
         y_offset: int = 0,
-        detection_fps: float = None
+        detection_fps: float = None,
+        flow_time: float = None,
+        match_time: float = None
     ) -> np.ndarray:
         """Draws bounding boxes, labels, and safety logic status dashboard onto a BGR frame."""
         import cv2
@@ -605,8 +470,8 @@ class YOLOv8Detector:
             
         # 2. Draw Safety HUD Dashboard
         # Draw background panel
-        cv2.rectangle(frame, (10, 10 + y_offset), (380, 155 + y_offset), (20, 20, 20), cv2.FILLED)
-        cv2.rectangle(frame, (10, 10 + y_offset), (380, 155 + y_offset), (100, 100, 100), 1)
+        cv2.rectangle(frame, (10, 10 + y_offset), (380, 205 + y_offset), (20, 20, 20), cv2.FILLED)
+        cv2.rectangle(frame, (10, 10 + y_offset), (380, 205 + y_offset), (100, 100, 100), 1)
         
         cv2.putText(frame, "SAFETY COMPLIANCE HUD", (20, 30 + y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
         cv2.line(frame, (20, 35 + y_offset), (370, 35 + y_offset), (100, 100, 100), 1)
@@ -659,6 +524,19 @@ class YOLOv8Detector:
             
         cv2.putText(frame, "Delegate: ", (20, 130 + y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
         cv2.putText(frame, display_provider, (95, 130 + y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.45, provider_color, 1, cv2.LINE_AA)
+
+        # Row 5: Prep/Inf/Post average times (in milliseconds)
+        avg_prep_ms = self.avg_preprocess_time * 1000
+        avg_inf_ms = self.avg_inference_time * 1000
+        avg_post_ms = self.avg_postprocess_time * 1000
+        latency_text = f"Prep: {avg_prep_ms:.1f}ms | Inf: {avg_inf_ms:.1f}ms | Post: {avg_post_ms:.1f}ms"
+        cv2.putText(frame, latency_text, (20, 155 + y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 180, 180), 1, cv2.LINE_AA)
+
+        # Row 6: Flow and Audio Match times (in milliseconds)
+        flow_str = f"Flow: {flow_time * 1000:.1f}ms" if flow_time is not None else "Flow: N/A"
+        match_str = f"Match: {match_time * 1000:.1f}ms" if match_time is not None else "Match: N/A"
+        latency_text_2 = f"{flow_str} | {match_str}"
+        cv2.putText(frame, latency_text_2, (20, 175 + y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 180, 180), 1, cv2.LINE_AA)
 
         # 3. Draw Optical Flow ROI boundary (thin blue rectangle)
         if roi_x1 is not None and roi_y is not None and roi_x2 is not None and height is not None:
