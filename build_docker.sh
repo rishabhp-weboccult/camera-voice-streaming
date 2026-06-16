@@ -1,0 +1,1 @@
+sudo docker buildx build --platform linux/arm64 -t rishabh3671/camera-voice-streaming-vz5100:1.0 --push .

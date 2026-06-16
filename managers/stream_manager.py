@@ -108,7 +108,7 @@ class StreamManager:
         self.det_out_queue = queue.Queue(maxsize=4)
         self.flow_queue = queue.Queue(maxsize=1)
         
-        self.latest_is_stationary = True
+        self.latest_is_stationary = False
         self.latest_flow_mag = 0.0
         self.flow_lock = threading.Lock()
         
@@ -1185,7 +1185,12 @@ class StreamManager:
                     "end_time": None,
                     "event_status": "no event conducted",
                     "event_captured": False,
-                    "frames_tracked": 1
+                    "frames_tracked": 1,
+                    "audio_matched_during_journey": False,
+                    "vehicle_stationary_during_journey": False,
+                    "has_stopped": False,
+                    "horn_while_stopped": False,
+                    "stationary_start_time": None
                 }
                 
                 # Append to journey.json
@@ -1195,7 +1200,8 @@ class StreamManager:
                         "journey_id": track_id,
                         "start_time": system_time,
                         "end_time": None,
-                        "event_status": "no event conducted"
+                        "event_status": "no event conducted",
+                        "reason": "didnt get stable, audio not matching(didnt blow horn)"
                     })
                     self._save_json_file("journey.json", journeys)
                     print(f"[Journey] Created new journey for Stop Sign ID: {track_id}")
@@ -1211,10 +1217,26 @@ class StreamManager:
             if self.vehicle_stationary_logic_enabled:
                 with self.flow_lock:
                     is_stationary = self.latest_is_stationary
-                    
-            match_crossed = current_score >= self.matching_threshold
             
-            if is_stable and is_stationary and match_crossed and not journey["event_captured"]:
+            # Record if vehicle is stationary and track stop duration
+            if is_stationary:
+                journey["vehicle_stationary_during_journey"] = True
+                if journey.get("stationary_start_time") is None:
+                    journey["stationary_start_time"] = timestamp
+                else:
+                    duration = timestamp - journey["stationary_start_time"]
+                    if is_stable and duration >= self.stop_sign_logic.required_stop_time:
+                        journey["has_stopped"] = True
+            else:
+                journey["stationary_start_time"] = None
+            
+            match_crossed = current_score >= self.matching_threshold
+            if match_crossed:
+                journey["audio_matched_during_journey"] = True
+                if is_stationary and journey.get("has_stopped", False):
+                    journey["horn_while_stopped"] = True
+            
+            if journey.get("has_stopped", False) and journey.get("horn_while_stopped", False) and not journey["event_captured"]:
                 # Trigger Event
                 journey["event_captured"] = True
                 journey["event_status"] = "conducted"
@@ -1234,11 +1256,13 @@ class StreamManager:
                     self._save_json_file("event.json", events)
                     print(f"[Event] Captured event for Stop Sign ID: {track_id} (Score: {current_score:.2f})")
                 
-                # Update event_status in journey.json
+                # Update event_status in journey.json and remove reason field since event was successfully conducted
                 journeys = self._load_json_file("journey.json")
                 for j in journeys:
                     if j.get("journey_id") == track_id:
                         j["event_status"] = "conducted"
+                        if "reason" in j:
+                            del j["reason"]
                         break
                 self._save_json_file("journey.json", journeys)
 
@@ -1266,6 +1290,29 @@ class StreamManager:
                 if j.get("journey_id") == journey_id:
                     j["end_time"] = system_time
                     j["event_status"] = j_mem["event_status"]
+                    
+                    # If event was not conducted, record the reason
+                    if j["event_status"] != "conducted":
+                        reasons = []
+                        if j_mem["frames_tracked"] < 3:
+                            reasons.append("didnt get stable")
+                        
+                        if self.vehicle_stationary_logic_enabled and not j_mem.get("vehicle_stationary_during_journey", False):
+                            reasons.append("vehicle not stationary")
+                        
+                        # Check audio/horn sequence
+                        if not j_mem.get("audio_matched_during_journey", False):
+                            reasons.append("audio not matching(didnt blow horn)")
+                        elif j_mem.get("vehicle_stationary_during_journey", False) and not j_mem.get("horn_while_stopped", False):
+                            reasons.append("audio not matching(horn not blown while stopped)")
+                        
+                        if reasons:
+                            j["reason"] = ", ".join(reasons)
+                        else:
+                            j["reason"] = "unknown reason"
+                    else:
+                        if "reason" in j:
+                            del j["reason"]
                     break
             self._save_json_file("journey.json", journeys)
             
